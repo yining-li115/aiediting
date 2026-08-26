@@ -1,0 +1,72 @@
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- node --------------------------------------------------------------------
+node_modules/
+.next/
+*.tsbuildinfo
+
+# --- secrets -----------------------------------------------------------------
+# Vendor API keys. .env.example is committed, .env never is.
+.env
+.env.*
+!.env.example
+apps/web/.env.local
+
+# --- generated ---------------------------------------------------------------
+# TypeScript mirrors of the Pydantic specs. Regenerate with `npm run types`
+# rather than committing a copy that can drift from its source.
+apps/web/src/lib/api/types.ts
+apps/web/src/lib/api/schema.json
+
+# --- rendered output ---------------------------------------------------------
+# Everything the renderer writes. Note: no trailing comment on this line -
+# git does not support inline comments, and one here would turn the pattern
+# into a string that matches nothing.
+/out/
+
+# --- user data ---------------------------------------------------------------
+# Uploaded footage, analysis proxies, keyframes, renders. Other people's
+# videos, gigabytes per project; they belong in storage, not in history.
+data/storage/
+data/media/
+data/media_*/
+data/processed/
+data/raw/
+data/aive.db
+data/aive.db-*
+
+# Music: the licence sidecars are worth keeping, the audio is not.
+data/music/*
+!data/music/*.json
+
+# Evaluation and preference datasets. Large, and some of it is licensed
+# material that must not be redistributed through a code repository.
+data/eval/*
+data/model_eval/*
+data/preferences/*
+!data/**/.gitkeep
+
+# --- sample media ------------------------------------------------------------
+# Real footage used for manual testing. Personal recordings and third-party
+# clips with visible watermarks: neither belongs in a public repository.
+# The hand-written TimelineSpec next to them is committed.
+examples/*
+!examples/*.json
+
+# --- logs --------------------------------------------------------------------
+# Model call logs carry prompts, responses and paths from real projects.
+logs/*.jsonl
+
+# --- os / editor -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

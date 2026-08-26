@@ -1,0 +1,55 @@
+[project]
+name = "aive"
+version = "0.1.0"
+description = "AI video editor - Lite MVP"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "typer>=0.12",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+    "tenacity>=8.3",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Block B (material understanding) pulls in the heavy CV / model stack.
+# Block A deliberately does not need any of it.
+material = [
+    "opencv-python>=4.10",
+    "scenedetect>=0.6.4",
+    "pillow>=10.3",
+    "librosa>=0.10",
+    "open-clip-torch>=2.24",
+    "torch>=2.3",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+aive = "aive.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["packages/aive"]
+
+[tool.pytest.ini_options]
+pythonpath = ["packages", "."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest-timeout>=2.4.0",
+]

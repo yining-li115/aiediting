@@ -1,0 +1,3 @@
+# Call logs contain prompts, model responses and file paths from real projects.
+# Useful locally, not something to commit.
+*.jsonl

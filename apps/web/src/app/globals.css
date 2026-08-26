@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* TODO 硬编码: the palette, read off the design mock. Neutral greys plus one
+   indigo accent. Kept as tokens so a rebrand is this block rather than a
+   search across every component. */
+@theme {
+  --color-canvas: #f6f6f7;
+  --color-surface: #ffffff;
+  --color-line: #ececee;
+  --color-line-strong: #e2e2e6;
+  --color-ink: #16161a;
+  --color-ink-soft: #5f6068;
+  --color-ink-faint: #9a9aa3;
+  --color-accent: #6152e8;
+  --color-accent-hover: #5344d6;
+  --color-accent-soft: #ede9fe;
+
+  --radius-card: 14px;
+  --radius-control: 10px;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family:
+    ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The mock is a light-only design. Committing to it explicitly beats
+   inheriting a half-working dark mode from the scaffold. */
+@media (prefers-color-scheme: dark) {
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+  }
+}
+
+/* Native selects keep their arrow otherwise, and the mock draws its own. */
+select {
+  appearance: none;
+}

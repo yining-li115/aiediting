@@ -1,0 +1,72 @@
+{
+  "spec_version": "1.0",
+  "timeline_id": "tl_demo",
+  "plan_id": "plan_demo",
+  "project_id": "proj_demo",
+  "duration": 6.0,
+  "aspect_ratio": "9:16",
+  "tracks": [
+    {
+      "type": "video",
+      "clips": [
+        {
+          "clip_id": "c_001",
+          "slot_id": "slot_01",
+          "source_id": "asset_001",
+          "source_in": 1.0,
+          "source_out": 2.6,
+          "timeline_start": 0.0,
+          "timeline_end": 1.6,
+          "speed": 1.0,
+          "transition_out": "hard_cut",
+          "source_audio_gain": 0.0
+        },
+        {
+          "clip_id": "c_002",
+          "slot_id": "slot_02",
+          "source_id": "asset_002",
+          "source_in": 0.5,
+          "source_out": 2.9,
+          "timeline_start": 1.6,
+          "timeline_end": 3.2,
+          "speed": 1.5,
+          "transition_out": "hard_cut",
+          "source_audio_gain": 0.0
+        },
+        {
+          "clip_id": "c_003",
+          "slot_id": "slot_03",
+          "source_id": "asset_003",
+          "source_in": 2.0,
+          "source_out": 4.8,
+          "timeline_start": 3.2,
+          "timeline_end": 6.0,
+          "speed": 1.0,
+          "transition_out": "hard_cut",
+          "source_audio_gain": 0.6
+        }
+      ]
+    },
+    { "type": "subtitle", "clips": [] }
+  ],
+  "audio": {
+    "music_id": "music_01",
+    "music_path": "data/media/music_01.m4a",
+    "music_in": 0.0,
+    "volume": 0.5,
+    "fade_in": 0.4,
+    "fade_out": 0.8,
+    "ducking": true
+  },
+  "render_constraints": {
+    "resolution": "1080x1920",
+    "fps": 30,
+    "video_codec": "h264",
+    "crf": 20,
+    "audio_codec": "aac",
+    "audio_bitrate": "128k"
+  },
+  "adaptation_log": [
+    { "slot_id": "slot_02", "action": "speed", "detail": "1.0 -> 1.5 to fit target" }
+  ]
+}
