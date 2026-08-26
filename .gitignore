@@ -70,3 +70,9 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# --- design mockups ----------------------------------------------------------
+# Reference images for the UI. Kept locally, not in history.
+*.png
+!apps/web/public/*.png
+!public/*.png
