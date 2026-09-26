@@ -8,6 +8,7 @@ later stage while looking like it works.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -215,3 +216,189 @@ def test_asset_ids_do_not_collide_across_projects(tmp_path, monkeypatch) -> None
     assert get_storage().open_local(first.assets[0].storage_key).exists()
 
     set_storage(None)
+
+
+# --- camera motion ---------------------------------------------------------
+
+
+def _shifted(frames: int = 6, dx: int = 4, dy: int = 0, size: int = 240):
+    """A textured frame translated by a fixed offset each step."""
+    rng = np.random.default_rng(3)
+    base = (rng.random((size * 2, size * 2)) * 255).astype(np.uint8)
+    return [
+        base[
+            size // 2 + i * dy : size // 2 + i * dy + size,
+            size // 2 + i * dx : size // 2 + i * dx + size,
+        ].copy()
+        for i in range(frames)
+    ]
+
+
+def _zoomed(frames: int = 6, step: float = 0.04, size: int = 240):
+    """A textured frame scaled up each step: what a push in looks like."""
+    import cv2
+
+    rng = np.random.default_rng(4)
+    base = (rng.random((size, size)) * 255).astype(np.uint8)
+    out = []
+    for i in range(frames):
+        scale = 1.0 + i * step
+        big = cv2.resize(base, None, fx=scale, fy=scale)
+        top = (big.shape[0] - size) // 2
+        left = (big.shape[1] - size) // 2
+        out.append(big[top : top + size, left : left + size].copy())
+    return out
+
+
+def test_translation_reads_as_a_pan() -> None:
+    from aive.material.quality import classify_motion
+
+    assert classify_motion([_shifted(dx=2, dy=0)]) in ("slow_pan", "fast_pan")
+
+
+def test_vertical_translation_reads_as_a_tilt() -> None:
+    from aive.material.quality import classify_motion
+
+    assert classify_motion([_shifted(dx=0, dy=2)]) == "tilt"
+
+
+def test_scaling_reads_as_a_zoom() -> None:
+    from aive.material.quality import classify_motion
+
+    assert classify_motion([_zoomed()]) in ("zoom_in", "zoom_out")
+
+
+def test_a_still_frame_reads_as_static() -> None:
+    from aive.material.quality import classify_motion
+
+    rng = np.random.default_rng(5)
+    frame = (rng.random((240, 240)) * 255).astype(np.uint8)
+    assert classify_motion([[frame.copy() for _ in range(6)]]) == "static"
+
+
+def test_fast_translation_is_not_mistaken_for_a_zoom() -> None:
+    """The failure this ordering exists to prevent.
+
+    A walking shot pointed at the ground produces a strongly translating
+    field. Testing the radial model first let it pass the zoom threshold by
+    accident, and two halves of one continuous take came back as zoom_in and
+    zoom_out.
+    """
+    from aive.material.quality import classify_motion
+
+    assert classify_motion([_shifted(dx=12, dy=0)]) == "fast_pan"
+
+
+def test_disagreeing_bursts_report_unknown() -> None:
+    """A confident wrong label poisons matching; unknown is only a weak match."""
+    from aive.material.quality import classify_motion
+
+    rng = np.random.default_rng(6)
+    still = (rng.random((240, 240)) * 255).astype(np.uint8)
+    bursts = [
+        _shifted(dx=3, dy=0),
+        [still.copy() for _ in range(6)],
+        _zoomed(),
+    ]
+    assert classify_motion(bursts) == "unknown"
+
+
+def test_no_frames_is_unknown_not_static() -> None:
+    from aive.material.quality import classify_motion
+
+    assert classify_motion([]) == "unknown"
+
+
+def test_the_model_is_no_longer_asked_for_camera_motion() -> None:
+    """Measured, not bought: a single frame contains no motion, and the field
+    costs output tokens to obtain a worse answer."""
+    from aive.providers.openai_compatible import Analysis
+
+    assert "camera_motion" not in Analysis.model_fields
+
+
+@pytest.mark.asyncio
+async def test_the_models_reject_verdict_reaches_the_pool() -> None:
+    """"worth_using: false" used to be requested, paid for and discarded.
+
+    A sharp, steady shot of the ground while walking passes every
+    deterministic check, so the model's judgement is the only thing that can
+    keep it out of the cut.
+    """
+    from aive.material import analyze as material_analyze
+    from aive.specs.segment import MaterialSegment, RawSegment
+
+    raw = RawSegment(
+        segment_id="s1", project_id="p1", asset_id="a1", start=0.0, end=3.0
+    )
+    segment = MaterialSegment(
+        segment_id="s1",
+        project_id="p1",
+        source_id="a1",
+        start=0.0,
+        end=3.0,
+        is_usable=True,
+        sharpness=0.95,
+        exposure_score=0.9,
+        technical_quality=0.92,
+    )
+
+    class Rejecting:
+        async def analyze_segment(self, seg, frames, clip=None):
+            return MaterialSegment(
+                segment_id=seg.segment_id,
+                project_id=seg.project_id,
+                source_id=seg.asset_id,
+                start=seg.start,
+                end=seg.end,
+                semantic="the ground while walking",
+                semantic_role="unknown",
+                shot_type="close_up",
+                reject_reason="model:empty frame, nothing happening",
+            )
+
+    out = await material_analyze._semantic_pass(
+        Rejecting(), segment, raw, [], asyncio.Semaphore(1)
+    )
+    assert out.is_usable is False
+    assert out.reject_reason.startswith("model:")
+
+
+@pytest.mark.asyncio
+async def test_the_model_cannot_rescue_footage_the_measurements_rejected() -> None:
+    """Blur is not a matter of opinion."""
+    from aive.material import analyze as material_analyze
+    from aive.specs.segment import MaterialSegment, RawSegment
+
+    raw = RawSegment(
+        segment_id="s2", project_id="p1", asset_id="a1", start=0.0, end=3.0
+    )
+    segment = MaterialSegment(
+        segment_id="s2",
+        project_id="p1",
+        source_id="a1",
+        start=0.0,
+        end=3.0,
+        is_usable=False,
+        reject_reason="quality:too blurry",
+        technical_quality=0.1,
+    )
+
+    class Enthusiastic:
+        async def analyze_segment(self, seg, frames, clip=None):
+            return MaterialSegment(
+                segment_id=seg.segment_id,
+                project_id=seg.project_id,
+                source_id=seg.asset_id,
+                start=seg.start,
+                end=seg.end,
+                semantic="a wonderful moment",
+                interestingness=0.99,
+                reject_reason=None,
+            )
+
+    out = await material_analyze._semantic_pass(
+        Enthusiastic(), segment, raw, [], asyncio.Semaphore(1)
+    )
+    assert out.is_usable is False
+    assert out.reject_reason == "quality:too blurry"

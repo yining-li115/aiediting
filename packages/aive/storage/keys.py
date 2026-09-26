@@ -16,6 +16,7 @@ from pathlib import Path
 # backends validate against.
 ORIGINAL = "original"  # exactly what the user uploaded
 PROXY = "proxy"  # normalised 540p copy used for analysis
+THUMBNAIL = "thumbnail"  # compact still used by the workspace
 KEYFRAME = "keyframe"  # stills sent to the material model
 MUSIC = "music"  # tracks uploaded for one project
 RENDER = "render"  # finished and preview videos

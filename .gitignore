@@ -41,6 +41,7 @@ data/processed/
 data/raw/
 data/aive.db
 data/aive.db-*
+data/aive.*.db
 
 # Music: the licence sidecars are worth keeping, the audio is not.
 data/music/*

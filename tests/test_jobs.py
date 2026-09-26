@@ -64,6 +64,23 @@ async def test_failed_job_captures_the_error(isolated_db) -> None:
     assert "ffmpeg exploded" in job["error"]
 
 
+async def test_job_can_only_be_claimed_once(isolated_db) -> None:
+    job_id = create_job("media_analysis", project_id="proj_1")
+    calls = 0
+
+    async def work(handle):
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    first = await run_job(job_id, work)
+    second = await run_job(job_id, work)
+
+    assert first is True
+    assert second is False
+    assert calls == 1
+
+
 async def test_spawn_returns_immediately(isolated_db) -> None:
     import asyncio
 
@@ -86,3 +103,26 @@ async def test_spawn_returns_immediately(isolated_db) -> None:
 
 def test_unknown_job_is_none(isolated_db) -> None:
     assert get_job("job_nope") is None
+
+
+def test_interrupted_durable_jobs_are_requeued(isolated_db) -> None:
+    from aive.db.models import Job
+    from aive.db.session import get_session_factory
+    from aive.jobs import JobRunner
+
+    sessions = get_session_factory()
+    with sessions.begin() as session:
+        session.add(
+            Job(
+                id="job_interrupted",
+                project_id="project_001",
+                kind="media_processing",
+                status="running",
+                stage="generating_proxy",
+            )
+        )
+
+    runner = JobRunner(sessions)
+
+    assert runner.recoverable("media_processing") == ("job_interrupted",)
+    assert runner.get("job_interrupted")["status"] == "queued"

@@ -19,6 +19,7 @@ from ..specs.segment import Asset
 
 PROXY_HEIGHT = 540
 PROXY_FPS = 30
+THUMBNAIL_WIDTH = 480
 
 
 class ProbeError(RuntimeError):
@@ -185,4 +186,66 @@ def make_proxy(
             f"proxy transcode failed for {asset.asset_id}: "
             f"{proc.stderr.strip()[:400]}"
         )
+    return out_path
+
+
+def make_thumbnail(
+    asset: Asset, source: Path, out_path: Path, force: bool = False
+) -> Path:
+    """Create one compact JPEG poster without changing authoritative media."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not force:
+        return out_path
+
+    cmd = [settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error"]
+    if asset.kind == "video":
+        cmd.extend(["-ss", f"{min(asset.duration / 2, 2.0):.3f}"])
+    cmd.extend(
+        [
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-vf",
+            (
+                f"scale={THUMBNAIL_WIDTH}:{THUMBNAIL_WIDTH}:"
+                "force_original_aspect_ratio=decrease"
+            ),
+            str(out_path),
+        ]
+    )
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ProbeError(
+            f"thumbnail generation failed for {asset.asset_id}: "
+            f"{proc.stderr.strip()[:400]}"
+        )
+    return out_path
+
+
+def cut_clip(source: Path, start: float, end: float, out_path: Path) -> Path:
+    """Extract one segment as a standalone file.
+
+    Segments are ranges, not files - nothing is cut during analysis, and
+    cutting only happens at render time. Sending a clip to a model is the one
+    case that needs a real file, so this produces a temporary one from the
+    540p proxy and the caller deletes it.
+
+    Re-encoded rather than stream-copied: a copy snaps to the nearest keyframe,
+    which for a two-second segment can miss the part we meant to ask about.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{start:.3f}",
+        "-t", f"{max(end - start, 0.1):.3f}",
+        "-i", str(source),
+        "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ProbeError(f"clip cut failed: {proc.stderr.strip()[:300]}")
     return out_path

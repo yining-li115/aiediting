@@ -1,16 +1,34 @@
-# AI Video Editor — Lite MVP
+# AI Video Editor — Investor Demo Build
 
-Conversational, stateful, taste-aware video editing agent.
-The authoritative plan is [docs/TECHNICAL_PLAN.md](docs/TECHNICAL_PLAN.md); model
-selection lives in [docs/MODEL_SELECTION.md](docs/MODEL_SELECTION.md).
+Conversational, stateful, taste-aware video editing Agent. The target is the
+complete investor-demo workflow, delivered as coherent vertical slices rather
+than a reduced feature demo.
 
-Current state: **build block A (skeleton) complete** — see docs/TECHNICAL_PLAN.md §13.
+The current product and architecture source is
+[AI Video Agent Technical Implementation v0.5](docs/AI_Video_Agent_Technical_Implementation_v0.5.pdf).
+Repository implementation rules and delivery order are defined in:
+
+- [Architecture Guardrails](docs/ARCHITECTURE_GUARDRAILS.md)
+- [Agentic Workspace Architecture](docs/AGENTIC_WORKSPACE_ARCHITECTURE.md)
+- [Investor Demo Roadmap](docs/INVESTOR_DEMO_ROADMAP.md)
+- [AI Coding Rules](docs/AI_CODING_RULES.md)
+- [ProjectDoc v1 Contract](docs/PROJECT_DOC_V1.md)
+- [Patch v1 Contract](docs/PATCH_V1.md)
+- [Revision and Commit State Machine](docs/REVISION_COMMIT_STATE_MACHINE.md)
+
+Current state: the Project kernel, immutable Revision history, browser project
+creation, project-scoped upload, durable proxy/thumbnail Jobs, and reload-safe
+media readiness are connected. Ready media now flows through durable physical
+Shot detection, quality/keyframe analysis, and semantic Moment understanding.
+Uploaded media is attached to ProjectDoc through the normal typed Patch path;
+derived Moments remain evidence. Revision-bound preview/export is the next
+vertical slice.
 
 ## Setup
 
 ```bash
 uv sync --extra dev          # Python 3.11+, pinned by pyproject
-uv run aive db init          # create the schema
+uv run alembic upgrade head  # create or upgrade the schema
 ```
 
 `ffmpeg` and `ffprobe` must be on PATH.
@@ -26,7 +44,7 @@ uv run pytest -q
 
 `examples/timeline_demo.json` is a hand-written TimelineSpec. Passing
 validation and rendering to a playable MP4 is block A's completion criterion,
-which currently holds: 6.02s at 1080x1920, 44 tests green, all offline.
+which is covered by the current offline test suite.
 
 ## Commands
 
@@ -42,18 +60,21 @@ which currently holds: 6.02s at 1080x1920, 44 tests green, all offline.
 ## Layout
 
 ```
-packages/aive/specs/      domain models + validation   <- the contract
+packages/aive/contracts/  ProjectDoc, Patch, Revision, and upload contracts
+packages/aive/project/    authoritative edit and commit services
+packages/aive/media/      upload and derived-media processing services
 packages/aive/providers/  one protocol per model role, mocks included
 packages/aive/renderer/   FFmpeg backend + pure command compiler
-packages/aive/db/         19 tables
+packages/aive/db/         SQLAlchemy repository adapters
 packages/aive/jobs.py     in-process job runner
 apps/api/                 FastAPI surface
 ```
 
-Two boundaries that must not blur:
+Three boundaries that must not blur:
 
-* the renderer reads `TimelineSpec` and never `EditPlanSpec`;
-* `matcher/` makes editing decisions, `renderer/compiler/` only translates.
+* ProjectDoc Revision is the only authoritative edit state;
+* uploaded bytes and technical metadata do not become a second timeline;
+* every UI or Agent edit commits through the same typed Patch path.
 
 ## Configuration
 

@@ -49,10 +49,10 @@ def test_duration_stats_describe_the_spread() -> None:
 def test_pace_ladder_matches_the_planners() -> None:
     """A reference's pace and a plan's pace must mean the same thing, or
     'match this reference' cannot be expressed as a plan."""
-    from aive.planner.plan import _pace_for
+    from aive.planner.plan import pace_for
 
     for duration in (0.6, 1.1, 1.6, 3.0):
-        assert aggregate.pace_of(duration) == _pace_for(duration)
+        assert aggregate.pace_of(duration) == pace_for(duration)
 
 
 def test_transition_density_counts_only_effects() -> None:

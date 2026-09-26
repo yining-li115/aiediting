@@ -107,6 +107,12 @@ def score_pair(
 
     motion = motion_affinity(slot.motion, segment.camera_motion)
     quality = segment.technical_quality if segment.technical_quality is not None else 0.5
+    # TODO(review): `quality` here is the deterministic measurement only.
+    # `segment.interestingness` and `segment.composition_score` - the model's
+    # judgement of whether the shot is worth watching and well framed - are
+    # stored and never read, so today they cost tokens and change nothing.
+    # They belong in this term (or their own) once the prompt makes them
+    # discriminate; see the TODO in providers/prompts.py.
     emotion = emotion_overlap(intent, segment)
 
     total = (

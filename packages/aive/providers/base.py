@@ -9,7 +9,10 @@ Models decide what the system can do. Models must not decide how it is built.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Awaitable, Callable, TypeVar
 
 from ..roles import Role
@@ -17,8 +20,37 @@ from ..specs.base import new_id
 
 T = TypeVar("T")
 
+# Per-task, so concurrent calls through one provider instance cannot overwrite
+# each other's record of what the model said.
+#
+# The variable holds a *mutable dict that the caller installs*, and the
+# provider fills it in place. Setting a new value would not work: retries run
+# the call inside asyncio.wait_for, which copies the context into a new task,
+# and a `set()` in there never reaches the caller. Mutating a shared object
+# does, because both contexts point at the same dict.
+_PROVENANCE: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "aive_provenance", default=None
+)
+
+
+@contextmanager
+def capture_provenance() -> Iterator[dict[str, Any]]:
+    """Collect the provenance of whatever call happens inside this block.
+
+        with capture_provenance() as evidence:
+            result = await provider.analyze_segment(...)
+        # evidence now holds the model, prompt version and raw response
+    """
+    sink: dict[str, Any] = {}
+    token = _PROVENANCE.set(sink)
+    try:
+        yield sink
+    finally:
+        _PROVENANCE.reset(token)
+
 __all__ = [
     "Role",
+    "capture_provenance",
     "CostRecord",
     "BaseProvider",
     "NonRetryable",
@@ -107,6 +139,26 @@ class BaseProvider:
         # the swallowed errors is what makes that diagnosable.
         self.attempt_errors: list[str] = []
 
+    def report_provenance(
+        self,
+        raw_response: str | None = None,
+        repairs: int = 0,
+        **extra: Any,
+    ) -> None:
+        sink = _PROVENANCE.get()
+        if sink is None:
+            # Nobody is collecting; the call still works, the evidence is just
+            # not being kept.
+            return
+        sink.update({
+            "provider": self.name,
+            "model": self.model,
+            "prompt_version": getattr(self, "prompt_version", None),
+            "raw_response": raw_response,
+            "repairs": repairs,
+            **extra,
+        })
+
     def report_usage(
         self,
         tokens_in: int | None = None,
@@ -124,6 +176,7 @@ class BaseProvider:
         fn: Callable[[], Awaitable[T]],
         *,
         seconds_processed: float | None = None,
+        project_id: str | None = None,
     ) -> T:
         started = time.perf_counter()
         attempt = 0
@@ -136,7 +189,7 @@ class BaseProvider:
                 self._pending_usage = None
                 record_cost(
                     CostRecord(
-                        project_id=self.project_id,
+                        project_id=project_id or self.project_id,
                         role=self.role.value,
                         provider=self.name,
                         model=self.model,
@@ -150,7 +203,7 @@ class BaseProvider:
             except NonRetryable as exc:
                 record_cost(
                     CostRecord(
-                        project_id=self.project_id,
+                        project_id=project_id or self.project_id,
                         role=self.role.value,
                         provider=self.name,
                         model=self.model,
@@ -168,7 +221,7 @@ class BaseProvider:
                 await asyncio.sleep(self._backoff_for(exc, attempt))
         record_cost(
             CostRecord(
-                project_id=self.project_id,
+                project_id=project_id or self.project_id,
                 role=self.role.value,
                 provider=self.name,
                 model=self.model,

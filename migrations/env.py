@@ -1,8 +1,7 @@
 """Alembic environment.
 
-``init_db()`` creates the schema from scratch for a fresh checkout; alembic
-takes over once the schema starts changing. Autogenerate compares against
-``Base.metadata`` so the models stay the single definition of the schema.
+``init_db()`` delegates here for both fresh and existing databases. Autogenerate
+compares against ``Base.metadata`` so models stay the single schema definition.
 """
 
 from __future__ import annotations

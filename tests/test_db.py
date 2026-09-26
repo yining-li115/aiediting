@@ -25,7 +25,7 @@ def session(tmp_path):
 
 
 def test_all_tables_created(session) -> None:
-    assert len(Base.metadata.tables) == 19
+    assert len(Base.metadata.tables) == 26
 
 
 def test_votes_are_stored_per_annotator(session) -> None:

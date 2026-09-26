@@ -59,7 +59,25 @@ def test_empty_prompt_still_produces_a_usable_intent() -> None:
     """An empty prompt must not yield an empty plan."""
     intent = parse_intent_rules(None)
     assert intent.target_duration == 45.0
-    assert intent.style == ["travel"]
+
+
+def test_an_unhinted_prompt_states_no_style_and_no_duration() -> None:
+    """Silence must stay distinguishable from a request.
+
+    A style invented here would be indistinguishable from one the user asked
+    for, and would then outrank their reference video in the merge.
+    """
+    intent = parse_intent_rules(None)
+    assert intent.style == []
+    assert intent.duration_stated is False
+    assert intent.rhythm.overall_pace is None
+    assert intent.text.subtitle_density is None
+    assert intent.audio.use_music is None
+
+
+def test_a_stated_duration_is_marked_as_stated() -> None:
+    assert parse_intent_rules("剪个30秒的").duration_stated is True
+    assert parse_intent_rules(None, target_duration=30.0).duration_stated is True
 
 
 def test_explicit_duration_overrides_the_prompt() -> None:
@@ -178,3 +196,15 @@ def test_keep_original_sound_reaches_the_audio_plan(pool_summary) -> None:
     intent = Intent(user_constraints=["keep_original_sound"])
     plan = generate_plans(PlanningContext("p", intent, pool_summary), 1)[0]
     assert plan.audio.keep_original_sound is True
+
+
+def test_a_negated_pace_word_does_not_become_a_style() -> None:
+    """"开头别太快" is an instruction to slow down, not an energetic style.
+
+    Single-character matches on 快/慢 fire inside the negations that mean the
+    opposite, so a chill request came back tagged energetic.
+    """
+    intent = parse_intent_rules("帮我剪个chill一点的，开头别太快")
+    assert "energetic" not in intent.style
+    assert "relaxed" in intent.style
+    assert "slow_pace" in intent.user_constraints

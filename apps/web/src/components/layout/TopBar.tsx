@@ -1,6 +1,8 @@
 "use client";
 
 import { Bell, ChevronDown, History, LayoutTemplate } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 
 import { LAYOUT } from "@/lib/config";
@@ -15,6 +17,11 @@ const USER = { name: "Lena", initial: "L" };
 
 export function TopBar() {
   const [active, setActive] = useState<(typeof TABS)[number]>("Workspace");
+  const pathname = usePathname();
+  const projectMatch = pathname.match(/^\/projects\/([^/]+)/);
+  const historyHref = projectMatch
+    ? `/projects/${projectMatch[1]}#history`
+    : null;
 
   return (
     <header
@@ -50,13 +57,24 @@ export function TopBar() {
           <LayoutTemplate size={16} />
           <span className="hidden md:inline">Templates</span>
         </button>
-        <button
-          type="button"
-          className="flex items-center gap-2 text-[13.5px] text-ink-soft transition-colors hover:text-ink"
-        >
-          <History size={16} />
-          <span className="hidden md:inline">History</span>
-        </button>
+        {historyHref ? (
+          <Link
+            href={historyHref}
+            className="flex items-center gap-2 text-[13.5px] text-ink-soft transition-colors hover:text-ink"
+          >
+            <History size={16} />
+            <span className="hidden md:inline">History</span>
+          </Link>
+        ) : (
+          <span
+            aria-disabled="true"
+            title="Open a project to view its history"
+            className="flex cursor-not-allowed items-center gap-2 text-[13.5px] text-ink-faint"
+          >
+            <History size={16} />
+            <span className="hidden md:inline">History</span>
+          </span>
+        )}
         <button
           type="button"
           className="text-ink-soft transition-colors hover:text-ink"

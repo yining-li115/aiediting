@@ -16,6 +16,7 @@ built and evaluated before the model stack is frozen.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,10 +24,10 @@ import numpy as np
 
 from ..config import settings
 from ..db.models import Asset as AssetRow
-from ..db.models import Project, Segment
+from ..db.models import Project, Segment, utcnow
 from ..db.session import session_scope
 from ..events import publish
-from ..providers import Role, get_provider
+from ..providers import Role, capture_provenance, get_provider
 from ..specs.base import new_id
 from ..storage import (
     KEYFRAME,
@@ -46,9 +47,16 @@ from ..specs.enums import PHOTO_SUFFIXES, VIDEO_SUFFIXES
 
 MEDIA_SUFFIXES = VIDEO_SUFFIXES | PHOTO_SUFFIXES
 
-# Bounded so a 100-clip project cannot open hundreds of model connections at
-# once; raise it once real provider rate limits are known.
+# TODO(review): bounded so a 100-clip project cannot open hundreds of
+# connections at once. Vendor limits turned out not to bind (30k requests and
+# 5M tokens per minute against our ~21 calls/minute at this concurrency), so
+# this is about being a well-behaved client and about how much work one
+# failure loses, not about staying under a quota.
 DEFAULT_CONCURRENCY = 8
+
+# segment_id -> what the model said and which model said it. Populated during
+# the semantic pass, drained by _persist.
+_PROVENANCE: dict[str, dict] = {}
 
 
 @dataclass
@@ -251,7 +259,15 @@ def _deterministic_pass(
     )
     # Interestingness has no deterministic estimator; until a VLM scores it,
     # technical quality is an honest placeholder rather than a fabricated one.
+    # TODO(review): the placeholder and the model's answer mean different
+    # things - one is "is this sharp and steady", the other is "is this worth
+    # watching" - so a pool analysed without a model and one analysed with it
+    # are not comparable on this field. Consider a separate column instead of
+    # overwriting, so it is always visible which of the two a value came from.
     segment.interestingness = metrics.technical_quality
+    # Measured, not inferred. A single frame contains no motion, so a model
+    # asked for this can only guess it from content.
+    segment.camera_motion = metrics.camera_motion
 
     # Rejected segments get no keyframes: no point paying for pixels, model
     # calls or disk on footage that will never enter the pool.
@@ -272,6 +288,10 @@ def _deterministic_pass(
         paths = kf.extract(
             source, raw.start, raw.end, [storage.reserve_local(k) for k in keys]
         )
+        if settings.material_input == "frame" and len(paths) > 1:
+            # Keep all three on disk - they are what the embedding averages -
+            # but only hand the middle one to the model.
+            paths = paths[len(paths) // 2 : len(paths) // 2 + 1]
         segment.keyframe_keys = [
             key for key, path in zip(keys, paths) if path.exists()
         ]
@@ -287,23 +307,41 @@ async def _semantic_pass(
     frames: list[Path],
     semaphore: asyncio.Semaphore,
     on_done=None,
+    clip_source: Path | None = None,
 ) -> MaterialSegment:
     """The one model call: what is in this shot, and is it worth using.
 
     The provider is passed in rather than constructed here: a local model would
     otherwise be reloaded once per segment.
     """
-    async with semaphore:
-        analysed = await provider.analyze_segment(raw, frames)
+    clip: Path | None = None
+    try:
+        if clip_source is not None:
+            handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            handle.close()
+            clip = probe.cut_clip(
+                clip_source, raw.start, raw.end, Path(handle.name)
+            )
+
+        async with semaphore:
+            with capture_provenance() as evidence:
+                analysed = await provider.analyze_segment(raw, frames, clip)
+    finally:
+        # The clip exists only to ask one question. Nothing downstream reads
+        # it, and leaving fifty of them behind per project is not storage,
+        # it is litter.
+        if clip is not None:
+            clip.unlink(missing_ok=True)
 
     # Only the semantic fields are taken from the model. Keyframe keys,
     # timing and quality already belong to the deterministic pass, and letting
     # a provider overwrite them would make the pool depend on which model ran.
+    # camera_motion is deliberately absent: it is computed from optical flow
+    # in the deterministic pass and must not be overwritten by a guess.
     for field in (
         "semantic",
         "semantic_role",
         "shot_type",
-        "camera_motion",
         "people",
         "emotion",
     ):
@@ -312,6 +350,25 @@ async def _semantic_pass(
         segment.interestingness = analysed.interestingness
     if analysed.composition_score is not None:
         segment.composition_score = analysed.composition_score
+
+    # The model's verdict on whether the shot is worth watching. Until now it
+    # was requested, paid for and discarded: the prompt spends a paragraph on
+    # it, the adapter turns it into a reject_reason, and nothing read the
+    # result - so a sharp, steady shot of the ground stayed in the pool.
+    #
+    # It can only reject, never rescue. The deterministic pass rejects on
+    # things a model cannot see past - blur, blown exposure, a shot too short
+    # to read - and letting "but it is interesting" overrule that would put
+    # unusable footage back in front of the matcher.
+    if segment.is_usable and analysed.reject_reason:
+        segment.is_usable = False
+        segment.reject_reason = analysed.reject_reason
+
+    # Attached to the object rather than added to MaterialSegment: provenance
+    # is about how a value was obtained, not part of the domain model that the
+    # matcher and the planner read.
+    _PROVENANCE[segment.segment_id] = dict(evidence)
+
     if on_done:
         on_done(segment)
     return segment
@@ -385,6 +442,17 @@ async def analyze_project(
     material = get_provider(Role.MATERIAL, project_id=project_id)
     failures: list[tuple[str, str]] = []
 
+    # Where to cut clips from, when the input mode asks for them. The proxy,
+    # not the original: 540p is enough to judge a shot and a fraction of the
+    # bytes to encode and upload.
+    clip_sources: dict[str, Path] = {}
+    if settings.material_input == "clip":
+        clip_sources = {
+            a.asset_id: storage.open_local(a.proxy_key or a.storage_key)
+            for a in assets
+            if a.kind == "video"
+        }
+
     # A rate-limited model gains nothing from high concurrency: the limiter
     # would just make eight coroutines queue behind each other. Matching the
     # two keeps progress reporting honest about what is actually happening.
@@ -432,6 +500,7 @@ async def analyze_project(
                 frames[s.segment_id],
                 semaphore,
                 on_done=_tick,
+                clip_source=clip_sources.get(s.source_id),
             )
             for s in usable
         ),
@@ -450,6 +519,7 @@ async def analyze_project(
             segment.embedding_dim = int(vector.size)
 
     _persist(segments, vectors)
+    _PROVENANCE.clear()
     if progress:
         progress(1.0)
     return AnalysisResult(
@@ -464,10 +534,17 @@ def _persist(
         for segment in segments:
             vector = vectors.get(segment.segment_id)
             row = session.get(Segment, segment.segment_id)
+            provenance = _PROVENANCE.get(segment.segment_id, {})
             values = dict(
                 project_id=segment.project_id,
                 asset_id=segment.source_id,
                 kind=segment.kind,
+                provider=provenance.get("provider"),
+                model=provenance.get("model"),
+                prompt_version=provenance.get("prompt_version"),
+                raw_response=(provenance.get("raw_response") or None),
+                repairs=provenance.get("repairs", 0),
+                analyzed_at=utcnow() if provenance else None,
                 start=segment.start,
                 end=segment.end,
                 duration=segment.duration,

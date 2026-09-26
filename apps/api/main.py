@@ -1,35 +1,158 @@
-"""HTTP surface.
-
-Block A exposes only what already works: health, database init, timeline
-validation and rendering as a background job. Upload and generation endpoints
-arrive with blocks B and C.
-"""
+"""HTTP surface for projects, media upload, validation, and rendering."""
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from .project_errors import install_project_error_handlers
+from .routes.assets import router as assets_router
+from .routes.director import router as director_router
+from .routes.project_revisions import (
+    get_project_revision_application,
+    router as project_revisions_router,
+)
+from .routes.projects import router as projects_router
+from .routes.renders import (
+    get_revision_render_application,
+    router as renders_router,
+)
 from .streams import sse_response
 
 from aive.config import settings
-from aive.db.session import init_db
-from aive.jobs import Stage, create_job, get_job, run_job
+from aive.agent import (
+    AutonomousProjectWorkflow,
+    DirectorApplication,
+    FirstCutWorkflow,
+    RenderReviewApplication,
+    RenderReviewEngine,
+    VideoAgentHarness,
+)
+from aive.db.analysis_repository import SqlAlchemyMediaAnalysisRepository
+from aive.db.director_repository import SqlAlchemyDirectorRunRepository
+from aive.db.media_repository import SqlAlchemyMediaAssetRepository
+from aive.db.project_repository import SqlAlchemyRevisionRepository
+from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.db.session import get_session_factory, init_db
+from aive.jobs import JobRunner, get_job
+from aive.media.analysis import MediaAnalysisApplication
+from aive.media.processing import MediaProcessingApplication
 from aive.providers.cost import install_db_cost_sink
-from aive.renderer import FFmpegRenderer
+from aive.providers import get_provider
+from aive.roles import Role
 from aive.specs import TimelineSpec, validate_timeline
+from aive.storage import get_storage
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
     install_db_cost_sink()
-    yield
+    sessions = get_session_factory()
+    jobs = JobRunner(sessions)
+    processing = MediaProcessingApplication(
+        storage=get_storage(),
+        assets=SqlAlchemyMediaAssetRepository(sessions),
+    )
+    analysis = MediaAnalysisApplication(
+        storage=get_storage(),
+        repository=SqlAlchemyMediaAnalysisRepository(sessions),
+    )
+    rendering = get_revision_render_application()
+    harness = VideoAgentHarness(
+        provider=get_provider(Role.DIRECTOR),
+        render_review_engine=RenderReviewEngine(
+            provider=get_provider(Role.REVIEWER),
+        ),
+    )
+    director = DirectorApplication(
+        runs=SqlAlchemyDirectorRunRepository(sessions),
+        projects=get_project_revision_application(),
+        analysis=SqlAlchemyMediaAnalysisRepository(sessions),
+        assets=SqlAlchemyMediaAssetRepository(sessions),
+        rendering=rendering,
+        harness=harness,
+    )
+    reviewing = RenderReviewApplication(
+        revisions=SqlAlchemyRevisionRepository(sessions),
+        artifacts=SqlAlchemyRenderRepository(sessions),
+        storage=get_storage(),
+        harness=harness,
+    )
+    first_cuts = FirstCutWorkflow(
+        jobs=jobs,
+        director=director,
+        rendering=rendering,
+        reviewing=reviewing,
+    )
+    autonomous = AutonomousProjectWorkflow(
+        jobs=jobs,
+        processing=processing,
+        analysis=analysis,
+        first_cuts=first_cuts,
+    )
+    pending_render_reviews = tuple(
+        run
+        for run in director.incomplete_render_reviews()
+        if run.status in {"awaiting_review", "reviewing"}
+    )
+    agent_render_job_ids = {
+        run.render_job_id
+        for run in pending_render_reviews
+        if run.render_job_id is not None
+    }
+    agent_review_job_ids = {
+        run.render_review_job_id
+        for run in pending_render_reviews
+        if run.render_review_job_id is not None
+    }
+    render_jobs = jobs.recoverable("revision_render")
+    review_jobs = jobs.recoverable("render_review")
+    recovered = {
+        asyncio.create_task(autonomous.run_processing_then_first_cut(job_id))
+        for job_id in jobs.recoverable("media_processing")
+    }
+    recovered.update(
+        asyncio.create_task(autonomous.run_analysis_then_first_cut(job_id))
+        for job_id in jobs.recoverable("media_analysis")
+    )
+    recovered.update(
+        asyncio.create_task(first_cuts.run(job_id))
+        for job_id in jobs.recoverable("director_first_cut")
+    )
+    recovered.update(
+        asyncio.create_task(first_cuts.resume_review(run.job_id))
+        for run in pending_render_reviews
+    )
+    recovered.update(
+        asyncio.create_task(jobs.run(job_id, rendering.process))
+        for job_id in render_jobs
+        if job_id not in agent_render_job_ids
+    )
+    recovered.update(
+        asyncio.create_task(jobs.run(job_id, reviewing.process))
+        for job_id in review_jobs
+        if job_id not in agent_review_job_ids
+    )
+    try:
+        yield
+    finally:
+        for task in recovered:
+            task.cancel()
+        if recovered:
+            await asyncio.gather(*recovered, return_exceptions=True)
 
 
 app = FastAPI(title="aive", version="0.1.0", lifespan=lifespan)
+app.include_router(projects_router)
+app.include_router(assets_router)
+app.include_router(director_router)
+app.include_router(project_revisions_router)
+app.include_router(renders_router)
+install_project_error_handlers(app)
 
 # The web app runs on its own dev server, so it is a different origin.
 # TODO(review): wide open for local development. Must be narrowed to the real
@@ -42,9 +165,6 @@ app.add_middleware(
 )
 
 
-
-
-
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "media_root": str(settings.media_root)}
@@ -52,44 +172,13 @@ def health() -> dict:
 
 @app.post("/validate")
 def validate(timeline: dict) -> dict:
+    """Compatibility validation for the legacy TimelineSpec API."""
     spec = TimelineSpec.model_validate(timeline)
     violations = validate_timeline(spec)
     return {
         "ok": not any(v.severity == "hard" for v in violations),
         "violations": [v.model_dump() for v in violations],
     }
-
-
-@app.post("/renders")
-def create_render(
-    payload: dict,
-    background: BackgroundTasks,
-) -> dict:
-    """Queue a render. The client polls GET /jobs/{id}."""
-    spec = TimelineSpec.model_validate(payload["timeline"])
-    quality = payload.get("quality", "proxy")
-    out_path = Path(payload.get("out", f"out/{spec.timeline_id}_{quality}.mp4"))
-    root = Path(payload.get("media_root", settings.media_root))
-
-    sources: dict[str, Path] = {}
-    for clip in spec.clips:
-        matches = list(root.glob(f"{clip.source_id}.*"))
-        if not matches:
-            raise HTTPException(404, f"no media for source_id {clip.source_id}")
-        sources[clip.source_id] = matches[0]
-
-    job_id = create_job("render", spec.project_id)
-
-    async def work(handle):
-        handle.update(
-            stage=Stage.RENDERING_PROXY if quality == "proxy" else Stage.RENDERING_HQ,
-            progress=0.1,
-        )
-        result = FFmpegRenderer().render(spec, quality, out_path, sources)
-        return result.as_dict()
-
-    background.add_task(run_job, job_id, work)
-    return {"job_id": job_id}
 
 
 @app.get("/jobs/{job_id}/stream")

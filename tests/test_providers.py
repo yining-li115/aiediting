@@ -71,3 +71,59 @@ async def test_passthrough_critic_reports_tie() -> None:
 def test_unknown_provider_names_are_rejected() -> None:
     with pytest.raises(KeyError):
         get_provider(Role.MATERIAL, "no-such-vendor")
+
+
+# --- provenance ------------------------------------------------------------
+
+
+async def test_provenance_records_which_model_said_what() -> None:
+    """"Why is this shot a close_up?" must be answerable from the row."""
+    from aive.providers import capture_provenance
+
+    provider = get_provider(Role.MATERIAL)
+    segment = RawSegment(
+        segment_id="s1", project_id="p", asset_id="a", start=0.0, end=2.0
+    )
+    with capture_provenance() as evidence:
+        await provider.analyze_segment(segment, [])
+
+    assert evidence["provider"] == "mock"
+    assert evidence["model"] == "mock-v1"
+    assert "s1" in evidence["raw_response"]
+
+
+async def test_concurrent_calls_do_not_swap_evidence() -> None:
+    """One provider instance serves many concurrent calls.
+
+    Keeping the last response on the instance meant whichever call finished
+    last overwrote the rest, and every segment ended up carrying some other
+    segment's evidence - which looks like working provenance until you read it.
+    """
+    import asyncio
+
+    from aive.providers import capture_provenance
+
+    provider = get_provider(Role.MATERIAL)
+
+    async def one(index: int) -> tuple[str, str]:
+        segment = RawSegment(
+            segment_id=f"seg_{index}", project_id="p", asset_id="a",
+            start=0.0, end=1.0,
+        )
+        with capture_provenance() as evidence:
+            await provider.analyze_segment(segment, [])
+        return segment.segment_id, evidence["raw_response"]
+
+    results = await asyncio.gather(*(one(i) for i in range(12)))
+    for segment_id, raw in results:
+        assert segment_id in raw, f"{segment_id} carries {raw!r}"
+
+
+async def test_uncollected_provenance_does_not_break_the_call() -> None:
+    """Pipeline code runs from the CLI too, where nobody is collecting."""
+    provider = get_provider(Role.MATERIAL)
+    result = await provider.analyze_segment(
+        RawSegment(segment_id="s", project_id="p", asset_id="a", start=0, end=1),
+        [],
+    )
+    assert result.segment_id == "s"

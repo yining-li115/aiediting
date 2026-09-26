@@ -37,7 +37,9 @@ from .db.session import session_scope
 from .material import analyze as material_analyze
 from .material.embedding import from_blob
 from .matcher import build_candidates
-from .planner import PlanningContext, generate_plans, parse_intent
+from .planner import PlanningContext, parse_intent
+from .planner.merge import merge
+from .reference import analyze as reference_analyze
 from .providers import Role, get_provider
 from .renderer import FFmpegRenderer
 from .specs.base import new_id
@@ -100,19 +102,38 @@ async def generate(
         )
 
     summary = pool_summary(project_id, segments)
+
+    # --- understand the request --------------------------------------------
     intent = await parse_intent(
-        prompt, get_provider(Role.PLANNER), target_duration=target_duration
+        prompt, get_provider(Role.INTENT), target_duration=target_duration
     )
-
-    # --- plan --------------------------------------------------------------
-    context = PlanningContext(project_id, intent, summary)
-    plans = generate_plans(context, count, seed)
     if keep_original_sound:
-        # Ambient sound and speech carry a lot of a vlog's character, so this
-        # is a real editorial choice rather than a debug switch.
-        for plan in plans:
-            plan.audio.keep_original_sound = True
+        # A UI switch is an explicit instruction and has to enter the merge as
+        # one, or it would lose to a reference video that keeps no sound.
+        intent.audio.keep_original_audio = True
 
+    # --- understand the references -----------------------------------------
+    # None when the project has no analysed style references, which is the
+    # normal case rather than a failure.
+    prior = reference_analyze.load_prior(project_id)
+    conditioning = merge(intent, prior)
+
+    # --- plan ---------------------------------------------------------------
+    context = PlanningContext(project_id, intent, summary, conditioning)
+    plans = await get_provider(Role.PLANNER).generate_plans(
+        {
+            "project_id": project_id,
+            "intent": intent,
+            "conditioning": conditioning,
+            "pool_summary": summary,
+            # Redundant with conditioning.target_duration on purpose: it is
+            # the one field every planner implementation needs, and a provider
+            # that only reads this key must not silently get 45s.
+            "target_duration": conditioning.target_duration,
+        },
+        count,
+        seed,
+    )
     if plans[0].audio.use_music:
         track = music_lib.choose(
             intent.style,

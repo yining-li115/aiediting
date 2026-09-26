@@ -12,9 +12,14 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from ..specs.edit_plan import EditPlanSpec
+from ..specs.edit_plan import EditPlanSpec, Intent
 from ..specs.operations import EditCommandPlan
 from ..specs.segment import MaterialSegment, RawSegment
+from ..contracts.moments import (
+    MomentGroupDecision,
+    ShotObservation,
+    TranscriptDraft,
+)
 
 
 @runtime_checkable
@@ -22,7 +27,10 @@ class MaterialUnderstandingProvider(Protocol):
     """(1) What is in the user's footage, and is it worth using."""
 
     async def analyze_segment(
-        self, segment: RawSegment, keyframes: list[Path]
+        self,
+        segment: RawSegment,
+        keyframes: list[Path],
+        clip: Path | None = None,
     ) -> MaterialSegment: ...
 
 
@@ -41,8 +49,29 @@ class ReferenceUnderstandingProvider(Protocol):
 
 
 @runtime_checkable
+class IntentUnderstandingProvider(Protocol):
+    """(3a) A sentence becomes structured constraints.
+
+    Separate from planning because it is a different job: this one only has to
+    not lose anything the user said, and must invent nothing. It is the one
+    place where "I could not tell" has to survive as null rather than being
+    resolved into a default - the precedence rules downstream depend on knowing
+    what the user did not say.
+    """
+
+    async def parse_intent(self, prompt: str) -> Intent: ...
+
+
+@runtime_checkable
 class PlannerProvider(Protocol):
-    """(3) How it should be cut. Reads a pool summary, not the clip list."""
+    """(3b) How it should be cut. Reads a pool summary, not the clip list.
+
+    Takes ``Conditioning`` (already merged, so the precedence rules are not
+    re-decided inside a prompt) plus an inventory of what footage exists, and
+    fills in a plan. It never sees a specific clip: binding material to slots
+    is the matcher's job, and keeping the two apart is what lets one plan be
+    re-matched against different footage.
+    """
 
     async def generate_plans(
         self, context: dict[str, Any], n: int, seed: int
@@ -89,4 +118,11 @@ class EditingAgentProvider(Protocol):
 
 @runtime_checkable
 class ASRProvider(Protocol):
-    async def transcribe(self, audio: Path) -> list[dict[str, Any]]: ...
+    async def transcribe(self, audio: Path) -> tuple[TranscriptDraft, ...]: ...
+
+
+@runtime_checkable
+class MomentGroupingProvider(Protocol):
+    async def group_moments(
+        self, shots: tuple[ShotObservation, ...]
+    ) -> tuple[MomentGroupDecision, ...]: ...

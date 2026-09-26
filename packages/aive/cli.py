@@ -44,7 +44,7 @@ def _load_sources(spec: TimelineSpec, media_root: Path) -> dict[str, Path]:
 
 @db_app.command("init")
 def db_init() -> None:
-    """Create every table."""
+    """Create or migrate every table to the current schema revision."""
     init_db()
     typer.echo(f"database ready at {settings.db_url}")
 
@@ -130,6 +130,63 @@ def segments(
         )
 
 
+@app.command("segment")
+def segment_show(
+    segment_id: str = typer.Argument(..., help="segment id"),
+) -> None:
+    """Everything known about one segment, including who labelled it.
+
+    "Why is this shot a close_up?" is unanswerable from the parsed values
+    alone, so the model, the prompt version and the raw response are stored
+    with the row.
+    """
+    from .db.models import Segment
+    from .db.session import session_scope
+
+    init_db()
+    with session_scope() as session:
+        row = session.get(Segment, segment_id)
+        if row is None:
+            typer.echo(f"no segment {segment_id}")
+            raise typer.Exit(1)
+
+        typer.echo(f"{row.id}  ({row.kind})")
+        typer.echo(f"  source     {row.asset_id} [{row.start:.2f}-{row.end:.2f}]")
+        typer.echo("")
+        typer.echo("  measured (deterministic):")
+        for field in (
+            "sharpness", "exposure_score", "stability_score",
+            "motion_quality", "technical_quality", "camera_motion",
+        ):
+            value = getattr(row, field)
+            shown = (
+                f"{value:.3f}"
+                if isinstance(value, float)
+                else (value if isinstance(value, str) else "n/a")
+            )
+            typer.echo(f"    {field:<20} {shown}")
+        typer.echo("")
+        typer.echo("  labelled (model):")
+        for field in (
+            "semantic_role", "shot_type", "people",
+            "interestingness", "composition_score",
+        ):
+            typer.echo(f"    {field:<20} {getattr(row, field)}")
+        typer.echo(f"    semantic             {row.semantic}")
+        typer.echo("")
+        typer.echo("  provenance:")
+        typer.echo(f"    provider             {row.provider or '-'}")
+        typer.echo(f"    model                {row.model or '-'}")
+        typer.echo(f"    prompt_version       {row.prompt_version or '-'}")
+        typer.echo(f"    repairs              {row.repairs}")
+        typer.echo(f"    analyzed_at          {row.analyzed_at or '-'}")
+        if row.raw_response:
+            typer.echo("")
+            typer.echo("  raw response:")
+            for line in row.raw_response.splitlines()[:30]:
+                typer.echo(f"    {line}")
+
+
 @app.command()
 def inspect(
     path: Path = typer.Argument(..., help="a spec JSON file"),
@@ -178,6 +235,7 @@ def models() -> None:
         typer.echo(
             f"  {row['role']:<12} {row['key']:<26} {row['status']:<12}"
             f" {row['vendor']}/{row['model']}"
+            + ("  [DATA SHARED]" if row.get("shared") else "")
         )
 
     typer.echo("\ncandidates per role:")
@@ -511,7 +569,12 @@ def check_model(
 
     role_enum = Role(role)
     card = card_for(role_enum, model)
-    typer.echo(f"model:    {card.key}  ({card.vendor}/{card.model_id})")
+    typer.echo(f"model:    {card.key}  ({card.vendor}/{card.resolved_model_id()})")
+    if card.data_shared_with_vendor:
+        typer.echo(
+            "  WARNING: this endpoint shares its traffic with the vendor. "
+            "Own test material only."
+        )
     typer.echo(f"adapter:  {card.adapter}   structured_output={card.structured_output}")
     if card.unknowns:
         typer.echo(f"unknowns: {', '.join(card.unknowns)}")
@@ -661,11 +724,14 @@ def plan(
     duration: float = typer.Option(None, help="target seconds, overrides the prompt"),
     candidates: int = typer.Option(None, help="how many plans to generate"),
 ) -> None:
-    """Generate EditPlanSpec candidates from the pool summary."""
+    """Generate EditPlanSpec candidates: real intent, real style, real planner."""
     import asyncio
 
     from .pipeline import load_pool, pool_summary
-    from .planner import PlanningContext, generate_plans, parse_intent
+    from .planner import parse_intent
+    from .planner.merge import merge
+    from .providers import Role, get_provider
+    from .reference import analyze as reference_analyze
 
     init_db()
     segments, _ = load_pool(project)
@@ -674,21 +740,84 @@ def plan(
         typer.echo(f"project {project} has no usable segments; run analyze first")
         raise typer.Exit(1)
 
-    intent = asyncio.run(parse_intent(prompt, target_duration=duration))
+    async def run():
+        intent = await parse_intent(
+            prompt, get_provider(Role.INTENT), target_duration=duration
+        )
+        prior = reference_analyze.load_prior(project)
+        conditioning = merge(intent, prior)
+        summary = pool_summary(project, segments)
+        plans = await get_provider(Role.PLANNER).generate_plans(
+            {
+                "project_id": project,
+                "intent": intent,
+                "conditioning": conditioning,
+                "pool_summary": summary,
+                "target_duration": conditioning.target_duration,
+            },
+            candidates or settings.candidate_count,
+            settings.seed,
+        )
+        return intent, prior, conditioning, plans
+
+    intent, prior, conditioning, plans = asyncio.run(run())
+
+    typer.echo("intent (what the user said):")
     typer.echo(
-        f"intent: {intent.target_duration:.0f}s  style={intent.style}"
-        f"  constraints={intent.user_constraints or '-'}"
+        f"  duration={intent.target_duration:.0f}s"
+        f" ({'stated' if intent.duration_stated else 'not stated'})"
+        f"  mood={intent.mood or '-'}  style={intent.style or '-'}"
     )
-    summary = pool_summary(project, segments)
-    context = PlanningContext(project, intent, summary)
-    for spec in generate_plans(context, candidates or settings.candidate_count):
-        variant = spec.provenance.extra.get("variant", "?")
+    if intent.negative_style:
+        typer.echo(f"  avoid the feel of: {intent.negative_style}")
+    if intent.content.prioritize or intent.content.avoid:
+        typer.echo(
+            f"  show more of {intent.content.prioritize or '-'},"
+            f" less of {intent.content.avoid or '-'}"
+        )
+    typer.echo(f"  constraints={intent.user_constraints or '-'}")
+
+    if prior is None:
+        typer.echo("style prior: none (no analysed reference videos)")
+    else:
+        typer.echo(
+            f"style prior: {len(prior.source_reference_ids)} reference(s),"
+            f" consistency {prior.consistency:.2f}"
+            f" -> {'used' if prior.is_usable() else 'REFUSED'}"
+        )
+    if conditioning.prior_rejected:
+        typer.echo(f"  {conditioning.prior_rejected}")
+
+    typer.echo("decided (and by whom):")
+    for field in (
+        "target_duration",
+        "pace",
+        "transition_density",
+        "subtitle_density",
+        "use_music",
+        "keep_original_sound",
+    ):
+        value = getattr(conditioning, field)
+        typer.echo(
+            f"  {field:<20} {str(value):<10} <- {conditioning.decided_by.get(field, '?')}"
+        )
+
+    typer.echo("plans:")
+    for spec in plans:
+        variant = spec.provenance.extra.get("variant", "baseline")
+        source = spec.provenance.extra.get("source", "?")
         typer.echo(
             f"  {variant:<14} {len(spec.slots):3d} slots"
             f"  {spec.planned_duration():5.1f}s  pace={spec.rhythm.pace:<12}"
             f" transitions={spec.rhythm.transition_density:.2f}"
-            f"  [{spec.story.narrative_arc}]"
+            f"  [{spec.story.narrative_arc}]  ({source})"
         )
+        for repair in spec.provenance.extra.get("repairs", []):
+            typer.echo(f"      repaired: {repair}")
+        if spec.provenance.extra.get("fallback_reason"):
+            typer.echo(
+                f"      fallback: {spec.provenance.extra['fallback_reason']}"
+            )
 
 
 @app.command()

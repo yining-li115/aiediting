@@ -1,0 +1,91 @@
+{
+  "patch_version": "1.0",
+  "patch_id": "patch_demo_08",
+  "project_id": "project_demo",
+  "base_revision_id": "revision_07",
+  "idempotency_key": "investor-demo-edit-08",
+  "origin": "agent",
+  "request_id": "request_08",
+  "summary": "Protect the opening, add motion and pace to the middle, and replace the ending shot.",
+  "scope": {
+    "kind": "bounded",
+    "target_ids": [
+      "clip_opening",
+      "clip_middle",
+      "clip_ending"
+    ],
+    "allow_ripple": false,
+    "preserve_ids": []
+  },
+  "operations": [
+    {
+      "op": "add_lock",
+      "operation_id": "operation_lock_opening",
+      "lock": {
+        "lock_id": "lock_opening_approved",
+        "target_type": "clip",
+        "target_id": "clip_opening",
+        "protect": [
+          "content",
+          "source_range",
+          "position",
+          "duration",
+          "deletion"
+        ],
+        "reason": "Opening approved by the user"
+      }
+    },
+    {
+      "op": "set_video_playback",
+      "operation_id": "operation_speed_middle",
+      "clip_id": "clip_middle",
+      "playback": {
+        "kind": "constant",
+        "rate": {
+          "num": 2,
+          "den": 1
+        }
+      }
+    },
+    {
+      "op": "set_visual_motion",
+      "operation_id": "operation_motion_middle",
+      "clip_id": "clip_middle",
+      "motion": {
+        "definition_id": "motion.beat_push_in",
+        "definition_version": "1.0.0",
+        "parameters": {
+          "strength": 0.14,
+          "easing": "ease_out"
+        }
+      }
+    },
+    {
+      "op": "set_visual_transition",
+      "operation_id": "operation_transition_middle",
+      "clip_id": "clip_middle",
+      "transition": {
+        "definition_id": "transition.cross_zoom",
+        "definition_version": "1.0.0",
+        "duration_frames": 10,
+        "parameters": {
+          "strength": 0.75
+        }
+      }
+    },
+    {
+      "op": "replace_visual_source",
+      "operation_id": "operation_replace_ending",
+      "clip_id": "clip_ending",
+      "source": {
+        "kind": "video",
+        "asset_id": "asset_ending_replacement",
+        "source": {
+          "start": 3000,
+          "end": 7000,
+          "timescale": 1000
+        }
+      }
+    }
+  ]
+}

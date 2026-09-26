@@ -11,7 +11,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import settings
-from .models import Base
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -30,16 +29,26 @@ def get_engine() -> Engine:
     return _engine
 
 
+def get_session_factory() -> sessionmaker[Session]:
+    get_engine()
+    assert _SessionFactory is not None
+    return _SessionFactory
+
+
 def init_db() -> None:
-    """Create every table. Alembic takes over once the schema starts moving."""
-    Base.metadata.create_all(get_engine())
+    """Bring the configured database to the current Alembic revision."""
+    from alembic import command  # noqa: PLC0415
+    from alembic.config import Config  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parents[3]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    command.upgrade(config, "head")
 
 
 @contextmanager
 def session_scope() -> Iterator[Session]:
-    get_engine()
-    assert _SessionFactory is not None
-    session = _SessionFactory()
+    session = get_session_factory()()
     try:
         yield session
         session.commit()

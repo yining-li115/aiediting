@@ -1,0 +1,118 @@
+"""Runtime boundary for model-driven video editing work."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from ..contracts.director import AgentRunContext
+from ..contracts.moments import MomentEvidence
+from ..contracts.rendering import RenderArtifact
+from ..contracts.revision import ProjectRevision
+from ..media.repository import AssetProcessingRecord
+from .context import AgentRunContextBuilder
+from .first_cut import build_first_cut_explanation
+from .pipeline import (
+    DirectorPipeline,
+    DirectorPipelineOutcome,
+    DirectorReviewRejected,
+    MAX_AUTOFIX_ATTEMPTS,
+)
+from .provider import DirectorProvider
+from .render_review import RenderReviewEngine, RenderReviewOutcome
+from .review import FirstCutReviewer
+
+
+class VideoAgentHarness:
+    """Own model context, review, and bounded recovery for Agent workflows.
+
+    The Harness has no repository or ProjectService access. Application
+    services persist its inputs and outputs and remain the only layer allowed
+    to commit typed Patches or enqueue renders.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: DirectorProvider,
+        context_builder: AgentRunContextBuilder | None = None,
+        reviewer: FirstCutReviewer | None = None,
+        render_review_engine: RenderReviewEngine | None = None,
+        max_repair_attempts: int = MAX_AUTOFIX_ATTEMPTS,
+    ) -> None:
+        self._provider = provider
+        self._context_builder = context_builder or AgentRunContextBuilder()
+        self._first_cut = DirectorPipeline(
+            provider=provider,
+            reviewer=reviewer or FirstCutReviewer(),
+            max_repair_attempts=max_repair_attempts,
+        )
+        self._render_review = render_review_engine or RenderReviewEngine()
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
+
+    @property
+    def provider_version(self) -> str:
+        return self._provider.version
+
+    @property
+    def render_reviewer_name(self) -> str:
+        return self._render_review.provider_name
+
+    @property
+    def render_reviewer_version(self) -> str:
+        return self._render_review.provider_version
+
+    def build_context(
+        self,
+        *,
+        revision: ProjectRevision,
+        asset_statuses: tuple[AssetProcessingRecord, ...],
+        moments: tuple[MomentEvidence, ...],
+    ) -> AgentRunContext:
+        """Build the frozen, project-scoped evidence for one Agent run."""
+
+        return self._context_builder.build(
+            revision=revision,
+            asset_statuses=asset_statuses,
+            moments=moments,
+        )
+
+    async def run_first_cut(
+        self,
+        context: AgentRunContext,
+    ) -> DirectorPipelineOutcome:
+        """Run the first-cut workflow without committing project state."""
+
+        outcome = await self._first_cut.create_first_cut(context)
+        decision = outcome.decision.model_copy(
+            update={
+                "explanation": build_first_cut_explanation(context, outcome.decision)
+            }
+        )
+        return DirectorPipelineOutcome(
+            decision=decision,
+            review=outcome.review,
+            repair_attempts=outcome.repair_attempts,
+        )
+
+    async def review_render(
+        self,
+        *,
+        revision: ProjectRevision,
+        artifact: RenderArtifact,
+        media_path: Path,
+        review_id: str,
+        reviewed_at: datetime,
+    ) -> RenderReviewOutcome:
+        """Review one exact ready Artifact without mutating project state."""
+
+        return await self._render_review.review(
+            revision=revision,
+            artifact=artifact,
+            media_path=media_path,
+            review_id=review_id,
+            reviewed_at=reviewed_at,
+        )

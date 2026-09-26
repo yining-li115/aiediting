@@ -1,0 +1,253 @@
+"""Translate a validated Director decision into the shared Patch v1 protocol."""
+
+from __future__ import annotations
+
+from hashlib import sha256
+from typing import Mapping
+
+from ..contracts.director import AgentRunContext, FirstCutDecision
+from ..contracts.moments import MomentEvidence
+from ..contracts.patch import Patch, PatchScope
+from ..contracts.patch_project import AddTrack, SetCreativePlan, SetTimelineDuration
+from ..contracts.project_doc import CreativePlan, PlanSection, ProjectDoc
+from ..contracts.time import FrameRange, SourceRange
+from ..contracts.timeline import (
+    AudioClip,
+    AudioTrack,
+    ImageClip,
+    VideoClip,
+    VideoTrack,
+)
+
+
+PHOTO_HOLD_SECONDS = 3
+
+
+class FirstCutBuildError(ValueError):
+    pass
+
+
+def build_first_cut_explanation(
+    context: AgentRunContext,
+    decision: FirstCutDecision,
+) -> str:
+    """Explain selected evidence and planned strategies without inventing edits."""
+
+    moments = {moment.moment_id: moment for moment in context.moments}
+    assets = {asset.asset_id: asset for asset in context.assets}
+    selected = [moments[moment_id] for moment_id in decision.moment_ids if moment_id in moments]
+    asset_count = len({moment.asset_id for moment in selected})
+    audible = sum(
+        1
+        for moment in selected
+        if (asset := assets.get(moment.asset_id)) is not None and asset.has_audio
+    )
+    parts = [
+        f"Selected {len(selected)} analyzed Moment(s) from {asset_count} source Asset(s).",
+        f"Creative direction: {decision.creative_strategy.objective}",
+    ]
+    if audible:
+        parts.append(f"Preserved source audio for {audible} selected video Moment(s).")
+    if decision.copy_strategy.title:
+        parts.append(f"Draft title: {decision.copy_strategy.title}")
+    if decision.copy_strategy.caption_mode != "none":
+        parts.append(
+            "Prepared a "
+            f"{decision.copy_strategy.caption_mode} caption strategy; caption rendering "
+            "is not applied by the current preview renderer."
+        )
+    parts.append(f"Audio strategy: {decision.music_strategy.mode}.")
+    return " ".join(parts)[:4_000]
+
+
+def build_first_cut_patch(
+    *,
+    document: ProjectDoc,
+    moments: tuple[MomentEvidence, ...],
+    decision: FirstCutDecision,
+    run_id: str,
+    request_id: str,
+    asset_has_audio: Mapping[str, bool],
+) -> Patch:
+    """Build one executable, gapless first-cut Patch from selected Moments."""
+
+    if document.intent.task_mode != "autonomous":
+        raise FirstCutBuildError("first-cut Director supports autonomous projects only")
+    if document.timeline.tracks:
+        raise FirstCutBuildError("first cut requires an empty base timeline")
+
+    by_moment = {moment.moment_id: moment for moment in moments}
+    by_asset = {asset.asset_id: asset for asset in document.assets}
+    target_frames = document.intent.target_duration_frames
+    fps = document.timeline.output.fps
+    cursor = 0
+    visual_clips: list[VideoClip | ImageClip] = []
+    audio_clips: list[AudioClip] = []
+    sections: list[PlanSection] = []
+
+    for ordinal, moment_id in enumerate(decision.moment_ids):
+        moment = by_moment.get(moment_id)
+        if moment is None:
+            raise FirstCutBuildError(
+                f"Director selected unknown Moment {moment_id!r}"
+            )
+        if moment.project_id != document.project_id:
+            raise FirstCutBuildError(
+                f"Moment {moment_id!r} belongs to another project"
+            )
+        if not moment.is_usable:
+            raise FirstCutBuildError(f"Moment {moment_id!r} is not usable")
+        asset = by_asset.get(moment.asset_id)
+        if asset is None or "source" not in asset.roles:
+            raise FirstCutBuildError(
+                f"Moment {moment_id!r} does not reference a declared source asset"
+            )
+        remaining = target_frames - cursor
+        if remaining <= 0:
+            break
+
+        if asset.kind == "video":
+            available = _source_frames(moment, fps.num, fps.den)
+            duration = min(available, remaining)
+            if duration <= 0:
+                continue
+            source = _frame_exact_source(moment, duration, fps.num, fps.den)
+            output = FrameRange(start_frame=cursor, duration_frames=duration)
+            clip_id = _stable_id("clip", run_id, moment_id, str(ordinal))
+            visual_clips.append(
+                VideoClip(
+                    clip_id=clip_id,
+                    asset_id=asset.asset_id,
+                    source=source,
+                    output=output,
+                )
+            )
+            if asset_has_audio.get(asset.asset_id, False):
+                audio_clips.append(
+                    AudioClip(
+                        clip_id=_stable_id("audio", run_id, moment_id, str(ordinal)),
+                        asset_id=asset.asset_id,
+                        source=source,
+                        output=output,
+                    )
+                )
+        elif asset.kind == "photo":
+            nominal = max(1, PHOTO_HOLD_SECONDS * fps.num // fps.den)
+            duration = min(nominal, remaining)
+            output = FrameRange(start_frame=cursor, duration_frames=duration)
+            clip_id = _stable_id("clip", run_id, moment_id, str(ordinal))
+            visual_clips.append(
+                ImageClip(
+                    clip_id=clip_id,
+                    asset_id=asset.asset_id,
+                    output=output,
+                )
+            )
+        else:
+            raise FirstCutBuildError(
+                f"source asset {asset.asset_id!r} cannot be used as a visual"
+            )
+
+        sections.append(
+            PlanSection(
+                section_id=_stable_id("section", run_id, moment_id, str(ordinal)),
+                output=output,
+                role=moment.semantic_role or "source_moment",
+                goal=(moment.semantic or moment.asr_text or "Use selected Moment")[:1_000],
+            )
+        )
+        cursor += duration
+
+    if not visual_clips or cursor <= 0:
+        raise FirstCutBuildError("Director decision produced no renderable visual clips")
+
+    video_track_id = _stable_id("track", run_id, "primary")
+    operations = [
+        AddTrack(
+            operation_id=_stable_id("op", run_id, "add-primary"),
+            track=VideoTrack(
+                track_id=video_track_id,
+                role="primary",
+                clips=tuple(visual_clips),
+            ),
+        )
+    ]
+    if audio_clips:
+        operations.append(
+            AddTrack(
+                operation_id=_stable_id("op", run_id, "add-source-audio"),
+                track=AudioTrack(
+                    track_id=_stable_id("track", run_id, "source-audio"),
+                    role="source",
+                    clips=tuple(audio_clips),
+                ),
+            )
+        )
+    operations.extend(
+        (
+            SetCreativePlan(
+                operation_id=_stable_id("op", run_id, "creative-plan"),
+                creative_plan=CreativePlan(
+                    summary=_creative_plan_summary(decision),
+                    sections=tuple(sections),
+                ),
+            ),
+            SetTimelineDuration(
+                operation_id=_stable_id("op", run_id, "duration"),
+                duration_frames=cursor,
+            ),
+        )
+    )
+    return Patch(
+        patch_id=_stable_id("patch", run_id),
+        project_id=document.project_id,
+        base_revision_id=document.revision_id,
+        idempotency_key=_stable_id("director-commit", run_id),
+        origin="agent",
+        request_id=request_id,
+        summary=decision.summary,
+        scope=PatchScope(kind="global"),
+        operations=tuple(operations),
+    )
+
+
+def _source_frames(moment: MomentEvidence, fps_num: int, fps_den: int) -> int:
+    ticks = moment.source.end - moment.source.start
+    return ticks * fps_num // (moment.source.timescale * fps_den)
+
+
+def _frame_exact_source(
+    moment: MomentEvidence,
+    duration_frames: int,
+    fps_num: int,
+    fps_den: int,
+) -> SourceRange:
+    """Rescale ticks so a one-times playback maps to an exact frame count."""
+
+    timescale = moment.source.timescale * fps_num
+    start = moment.source.start * fps_num
+    end = start + duration_frames * moment.source.timescale * fps_den
+    if end > moment.source.end * fps_num:
+        raise FirstCutBuildError(
+            f"Moment {moment.moment_id!r} cannot supply the requested frames"
+        )
+    return SourceRange(start=start, end=end, timescale=timescale)
+
+
+def _stable_id(prefix: str, *parts: str) -> str:
+    digest = sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}_{digest}"
+
+
+def _creative_plan_summary(decision: FirstCutDecision) -> str:
+    parts = [
+        decision.creative_strategy.objective,
+        f"Pacing: {decision.creative_strategy.pacing}.",
+    ]
+    if decision.creative_strategy.hook:
+        parts.append(f"Hook: {decision.creative_strategy.hook}")
+    if decision.copy_strategy.title:
+        parts.append(f"Draft title: {decision.copy_strategy.title}")
+    parts.append(f"Caption strategy: {decision.copy_strategy.caption_mode}.")
+    parts.append(f"Music strategy: {decision.music_strategy.mode}.")
+    return " ".join(parts)[:4_000]

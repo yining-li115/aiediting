@@ -29,6 +29,8 @@ interface Props {
   onGenerate: () => void;
   generating?: boolean;
   disabled?: boolean;
+  actionLabel?: string;
+  busyLabel?: string;
 }
 
 const unwired = (key: string) =>
@@ -40,6 +42,8 @@ export function VideoSettings({
   onGenerate,
   generating,
   disabled,
+  actionLabel = "Generate Draft",
+  busyLabel = "Generating...",
 }: Props) {
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     onChange({ ...settings, [key]: value });
@@ -116,7 +120,7 @@ export function VideoSettings({
         className="mt-6 flex h-[46px] items-center justify-center gap-2 rounded-[var(--radius-control)] bg-accent text-[14px] font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Sparkles size={16} />
-        {generating ? "Generating..." : "Generate Draft"}
+        {generating ? busyLabel : actionLabel}
       </button>
 
       {/* TODO 硬编码: there is no billing system, so this cost is fixed and

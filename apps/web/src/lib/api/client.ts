@@ -13,11 +13,26 @@
  */
 
 import type {
-  Asset,
+  AssetProcessingStatus,
+  AssetUploadResponse,
+  CreateRenderRequest,
+  CreateFirstCutRequest,
+  DirectorRun,
+  CreateProjectRequest,
   EditPlanSpec,
   MaterialSegment,
+  MomentEvidence,
+  Patch,
+  ProjectRevision,
+  RenderArtifact,
+  RenderTicket,
+  FirstCutTicket,
   ReferenceAnalysis,
+  RestoreRevisionRequest,
+  RevisionMutationResponse,
   TimelineSpec,
+  TranscriptEvidence,
+  UploadAssetsRequest,
 } from "./types";
 
 export const API_BASE =
@@ -27,6 +42,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly detail: string,
+    readonly code?: string,
+    readonly retryable = false,
   ) {
     super(`${status}: ${detail}`);
     this.name = "ApiError";
@@ -48,13 +65,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // FastAPI puts the message in `detail`; fall back to the raw body so a
     // proxy error or a crash is still readable rather than "[object Object]".
     let detail = response.statusText;
+    let code: string | undefined;
+    let retryable = response.status >= 500;
     try {
       const body = await response.json();
-      detail = body?.detail ?? JSON.stringify(body);
+      if (typeof body?.detail === "string") {
+        detail = body.detail;
+      } else if (body?.detail && typeof body.detail === "object") {
+        detail = body.detail.message ?? JSON.stringify(body.detail);
+        code = body.detail.code;
+        retryable = body.detail.retryable ?? retryable;
+      } else {
+        detail = JSON.stringify(body);
+      }
     } catch {
       detail = (await response.text()) || detail;
     }
-    throw new ApiError(response.status, detail);
+    throw new ApiError(response.status, detail, code, retryable);
   }
 
   if (response.status === 204) return undefined as T;
@@ -69,6 +96,8 @@ export type JobStage =
   | "planning"
   | "matching"
   | "scoring"
+  | "generating_proxy"
+  | "generating_thumbnail"
   | "rendering_proxy"
   | "rendering_hq"
   | "done"
@@ -123,56 +152,212 @@ export async function waitForJob<T>(
 
 /* --- projects ------------------------------------------------------------ */
 
-export interface Project {
-  project_id: string;
-  mode: "auto" | "reference_remake";
-  prompt: string | null;
-  status: string;
-  created_at: string;
-}
+export const createProject = (body: CreateProjectRequest) =>
+  request<RevisionMutationResponse>("/projects", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
-export const createProject = (body: { prompt?: string; mode?: string }) =>
-  request<Project>("/projects", { method: "POST", body: JSON.stringify(body) });
+/* --- authoritative project revisions ----------------------------------- */
 
-export const getProject = (id: string) => request<Project>(`/projects/${id}`);
+const pathSegment = (value: string) => encodeURIComponent(value);
+
+export const getCurrentProjectRevision = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<ProjectRevision>(
+    `/projects/${pathSegment(projectId)}/revisions/current`,
+    { signal },
+  );
+
+export const listProjectRevisions = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<ProjectRevision[]>(`/projects/${pathSegment(projectId)}/revisions`, {
+    signal,
+  });
+
+export const getProjectRevision = (
+  projectId: string,
+  revisionId: string,
+  signal?: AbortSignal,
+) =>
+  request<ProjectRevision>(
+    `/projects/${pathSegment(projectId)}/revisions/${pathSegment(revisionId)}`,
+    { signal },
+  );
+
+export const applyProjectPatch = (
+  projectId: string,
+  patch: Patch,
+  requireReview = false,
+) =>
+  request<RevisionMutationResponse>(
+    `/projects/${pathSegment(projectId)}/patches?require_review=${requireReview}`,
+    { method: "POST", body: JSON.stringify(patch) },
+  );
+
+export const restoreProjectRevision = (
+  projectId: string,
+  body: RestoreRevisionRequest,
+  requireReview = false,
+) =>
+  request<RevisionMutationResponse>(
+    `/projects/${pathSegment(projectId)}/restores?require_review=${requireReview}`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const acceptProjectCandidate = (projectId: string, commitId: string) =>
+  request<RevisionMutationResponse>(
+    `/projects/${pathSegment(projectId)}/commits/${pathSegment(commitId)}/accept`,
+    { method: "POST" },
+  );
 
 /* --- material ------------------------------------------------------------ */
 
-export interface UploadResult {
-  assets: Asset[];
-  skipped: { name: string; reason: string }[];
-}
-
 /**
- * Upload material. Accepts video and photos together.
- *
- * `skipped` must be surfaced in the UI. Silently dropping files the backend
- * did not recognise is how a user ends up believing all 45 of their clips were
- * imported when only 30 were.
+ * Upload a complete media batch and commit its AssetRefs as one new revision.
+ * Invalid batches fail as a whole; the backend never silently skips a file.
  */
 export function uploadAssets(
   projectId: string,
+  manifest: UploadAssetsRequest,
   files: File[],
   onProgress?: (fraction: number) => void,
-): Promise<UploadResult> {
+): Promise<AssetUploadResponse> {
   const form = new FormData();
+  form.append("manifest", JSON.stringify(manifest));
   files.forEach((file) => form.append("files", file));
 
   // fetch cannot report upload progress; XHR still can.
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE}/projects/${projectId}/assets`);
+    xhr.open("POST", `${API_BASE}/projects/${pathSegment(projectId)}/assets`);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress?.(event.loaded / event.total);
     };
-    xhr.onload = () =>
-      xhr.status >= 200 && xhr.status < 300
-        ? resolve(JSON.parse(xhr.responseText))
-        : reject(new ApiError(xhr.status, xhr.responseText));
-    xhr.onerror = () => reject(new ApiError(0, "network error"));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText));
+        return;
+      }
+      let detail = xhr.statusText || "media upload failed";
+      let code: string | undefined;
+      let retryable = xhr.status >= 500;
+      try {
+        const body = JSON.parse(xhr.responseText);
+        if (typeof body?.detail === "string") {
+          detail = body.detail;
+        } else if (body?.detail && typeof body.detail === "object") {
+          detail = body.detail.message ?? JSON.stringify(body.detail);
+          const issues = body.detail.details?.issues;
+          if (Array.isArray(issues) && issues.length > 0) {
+            detail = issues
+              .map((issue) => issue?.message)
+              .filter((message): message is string => Boolean(message))
+              .join("; ");
+          }
+          code = body.detail.code;
+          retryable = body.detail.retryable ?? retryable;
+        }
+      } catch {
+        detail = xhr.responseText || detail;
+      }
+      reject(new ApiError(xhr.status, detail, code, retryable));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network error", undefined, true));
     xhr.send(form);
   });
 }
+
+export const listProjectAssets = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<AssetProcessingStatus[]>(
+    `/projects/${pathSegment(projectId)}/assets`,
+    { signal },
+  );
+
+export const listProjectMoments = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<MomentEvidence[]>(
+    `/projects/${pathSegment(projectId)}/moments`,
+    { signal },
+  );
+
+export const listProjectTranscripts = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<TranscriptEvidence[]>(
+    `/projects/${pathSegment(projectId)}/transcripts`,
+    { signal },
+  );
+
+export const assetProxyUrl = (projectId: string, assetId: string) =>
+  `${API_BASE}/projects/${pathSegment(projectId)}/assets/${pathSegment(assetId)}/proxy`;
+
+export const assetThumbnailUrl = (projectId: string, assetId: string) =>
+  `${API_BASE}/projects/${pathSegment(projectId)}/assets/${pathSegment(assetId)}/thumbnail`;
+
+/* --- autonomous first cut ---------------------------------------------- */
+
+export const createFirstCut = (
+  projectId: string,
+  body: CreateFirstCutRequest,
+) =>
+  request<FirstCutTicket>(`/projects/${pathSegment(projectId)}/first-cuts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getLatestFirstCut = (
+  projectId: string,
+  signal?: AbortSignal,
+) =>
+  request<DirectorRun | null>(
+    `/projects/${pathSegment(projectId)}/first-cuts/latest`,
+    { signal },
+  );
+
+/* --- revision-bound rendering ------------------------------------------ */
+
+export const createRevisionRender = (
+  projectId: string,
+  body: CreateRenderRequest,
+) =>
+  request<RenderTicket>(`/projects/${pathSegment(projectId)}/renders`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const listRevisionRenders = (
+  projectId: string,
+  revisionId: string,
+  signal?: AbortSignal,
+) =>
+  request<RenderArtifact[]>(
+    `/projects/${pathSegment(projectId)}/revisions/${pathSegment(revisionId)}/renders`,
+    { signal },
+  );
+
+export const getRevisionRender = (
+  projectId: string,
+  artifactId: string,
+  signal?: AbortSignal,
+) =>
+  request<RenderArtifact>(
+    `/projects/${pathSegment(projectId)}/renders/${pathSegment(artifactId)}`,
+    { signal },
+  );
+
+export const renderContentUrl = (projectId: string, artifactId: string) =>
+  `${API_BASE}/projects/${pathSegment(projectId)}/renders/${pathSegment(artifactId)}/content`;
 
 export const listSegments = (projectId: string, includeRejected = false) =>
   request<MaterialSegment[]>(

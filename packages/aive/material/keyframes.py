@@ -29,15 +29,30 @@ def extract(
     Paths are supplied by the caller because storage owns the layout; this
     function only knows how to pull frames out of a video.
     """
+    span = max(end - start, 1e-3)
+    return extract_at_offsets(
+        video_path,
+        [start + span * fraction for fraction in FRACTIONS],
+        targets,
+        width,
+    )
+
+
+def extract_at_offsets(
+    video_path: str,
+    offsets: list[float],
+    targets: list[Path],
+    width: int = 512,
+) -> list[Path]:
+    """Write representative frames at exact offsets supplied by the caller."""
     capture = cv2.VideoCapture(video_path)
     if not capture.isOpened():
         return []
 
     paths: list[Path] = []
     try:
-        span = max(end - start, 1e-3)
-        for fraction, path in zip(FRACTIONS, targets):
-            capture.set(cv2.CAP_PROP_POS_MSEC, (start + span * fraction) * 1000.0)
+        for offset, path in zip(offsets, targets):
+            capture.set(cv2.CAP_PROP_POS_MSEC, offset * 1000.0)
             ok, frame = capture.read()
             if not ok or frame is None:
                 continue

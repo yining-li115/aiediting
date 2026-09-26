@@ -9,10 +9,10 @@ Two sources, deliberately:
 
 * the **domain specs** (EditPlanSpec, TimelineSpec, MaterialSegment ...) are
   the real contract and change more often than the endpoints;
-* the **OpenAPI schema** covers request and response shapes for the HTTP
-  surface, which is thin today and will grow.
+* the **project kernel and API envelopes** cover request and response shapes
+  that cross the HTTP boundary.
 
-Run after changing anything in packages/aive/specs/:
+Run after changing an exported Pydantic contract or API envelope:
 
     uv run python scripts/generate_types.py
 """
@@ -24,7 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "packages"))
 
 from aive.specs import (  # noqa: E402
     Asset,
@@ -36,6 +38,33 @@ from aive.specs import (  # noqa: E402
     ReferenceAnalysis,
     TimelineSpec,
 )
+from aive.contracts.patch import Patch  # noqa: E402
+from aive.contracts.director import (  # noqa: E402
+    CreateFirstCutRequest,
+    DirectorRun,
+    FirstCutDecision,
+    FirstCutTicket,
+)
+from aive.contracts.media import (  # noqa: E402
+    AssetProcessingStatus,
+    UploadAssetItem,
+    UploadAssetsRequest,
+    UploadedAsset,
+)
+from aive.contracts.moments import MomentEvidence, TranscriptEvidence  # noqa: E402
+from aive.contracts.project import CreateProjectRequest  # noqa: E402
+from aive.contracts.project_doc import ProjectDoc  # noqa: E402
+from aive.contracts.revision import (  # noqa: E402
+    ProjectRevision,
+    RestoreRevisionRequest,
+)
+from aive.contracts.rendering import (  # noqa: E402
+    CreateRenderRequest,
+    RenderArtifact,
+    RenderTicket,
+)
+from aive.project.commit_state import CommitAttempt  # noqa: E402
+from apps.api.schemas import AssetUploadResponse, RevisionMutationResponse  # noqa: E402
 
 OUT_DIR = Path("apps/web/src/lib/api")
 SCHEMA_PATH = OUT_DIR / "schema.json"
@@ -53,6 +82,27 @@ EXPORTED = [
     EditOperation,
     EditScope,
     ProjectVersion,
+    ProjectDoc,
+    CreateProjectRequest,
+    Patch,
+    ProjectRevision,
+    RestoreRevisionRequest,
+    CommitAttempt,
+    RevisionMutationResponse,
+    AssetProcessingStatus,
+    MomentEvidence,
+    TranscriptEvidence,
+    UploadAssetItem,
+    UploadAssetsRequest,
+    UploadedAsset,
+    AssetUploadResponse,
+    CreateRenderRequest,
+    RenderArtifact,
+    RenderTicket,
+    CreateFirstCutRequest,
+    FirstCutDecision,
+    DirectorRun,
+    FirstCutTicket,
 ]
 
 
@@ -85,12 +135,12 @@ def main() -> int:
     print(f"wrote {SCHEMA_PATH}")
 
     banner = (
-        "/* Generated from packages/aive/specs by scripts/generate_types.py.\n"
+        "/* Generated from backend Pydantic contracts by scripts/generate_types.py.\n"
         " * Do not edit: run `npm run types` after changing a spec. */\n\n"
     )
     result = subprocess.run(
         [
-            "npx", "--yes", "json-schema-to-typescript@15",
+            "npm", "exec", "--prefix", "apps/web", "--", "json2ts",
             str(SCHEMA_PATH),
             "--no-additionalProperties",
             "--unreachableDefinitions",

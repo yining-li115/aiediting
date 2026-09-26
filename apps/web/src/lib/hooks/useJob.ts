@@ -83,6 +83,8 @@ export const STAGE_LABELS: Record<JobStage, string> = {
   planning: "Planning the edit",
   matching: "Choosing shots",
   scoring: "Comparing versions",
+  generating_proxy: "Preparing preview media",
+  generating_thumbnail: "Creating thumbnails",
   rendering_proxy: "Rendering previews",
   rendering_hq: "Rendering the final cut",
   done: "Done",

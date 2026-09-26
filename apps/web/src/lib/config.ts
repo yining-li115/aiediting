@@ -91,6 +91,27 @@ export const QUALITIES = [
   { value: "4k", label: "4K" },
 ] as const;
 
+// TODO 硬编码: initial canvas dimensions selected by the quality/aspect
+// controls. The renderer capability endpoint will replace this lookup once
+// revision-bound rendering is connected.
+export const OUTPUT_DIMENSIONS = {
+  "720p": {
+    "16:9": { width: 1280, height: 720 },
+    "9:16": { width: 720, height: 1280 },
+    "1:1": { width: 720, height: 720 },
+  },
+  "1080p": {
+    "16:9": { width: 1920, height: 1080 },
+    "9:16": { width: 1080, height: 1920 },
+    "1:1": { width: 1080, height: 1080 },
+  },
+  "4k": {
+    "16:9": { width: 3840, height: 2160 },
+    "9:16": { width: 2160, height: 3840 },
+    "1:1": { width: 2160, height: 2160 },
+  },
+} as const;
+
 export const DEFAULT_SETTINGS = {
   // TODO 硬编码: defaults from the mock.
   length: 60,

@@ -23,6 +23,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -57,6 +58,16 @@ class Project(Base, TimestampMixin):
     prompt: Mapped[str | None] = mapped_column(Text)
     intent_json: Mapped[dict | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32), default="created")
+    current_revision_id: Mapped[str | None] = mapped_column(
+        String(128),
+        ForeignKey(
+            "project_revisions.id",
+            name="fk_projects_current_revision_id",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
+    )
 
 
 class Asset(Base, TimestampMixin):
@@ -72,6 +83,19 @@ class Asset(Base, TimestampMixin):
     project_id: Mapped[str] = mapped_column(String(64), ForeignKey("projects.id"))
     storage_key: Mapped[str] = mapped_column(Text)
     proxy_key: Mapped[str | None] = mapped_column(Text)
+    thumbnail_key: Mapped[str | None] = mapped_column(Text)
+    readiness: Mapped[str] = mapped_column(String(32), default="uploaded")
+    processing_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id"), index=True
+    )
+    processing_error: Mapped[str | None] = mapped_column(Text)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analysis_readiness: Mapped[str] = mapped_column(String(32), default="pending")
+    analysis_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id"), index=True
+    )
+    analysis_error: Mapped[str | None] = mapped_column(Text)
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kind: Mapped[str] = mapped_column(String(16), default="video")
     original_name: Mapped[str | None] = mapped_column(Text)
     # Content hash: identifies duplicate uploads, which are common when people
@@ -120,6 +144,124 @@ class Segment(Base):
 
     is_usable: Mapped[bool] = mapped_column(Boolean, default=True)
     reject_reason: Mapped[str | None] = mapped_column(String(128))
+
+    # --- where the semantic fields came from ---
+    #
+    # "Why is this shot labelled close_up?" is a question that will be asked
+    # constantly while tuning, and it is unanswerable from the parsed values
+    # alone. Storing the model, the prompt version and the raw text next to
+    # the row means the answer survives a prompt change or a model swap;
+    # grepping a log file by timestamp does not.
+    provider: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(128))
+    prompt_version: Mapped[str | None] = mapped_column(String(64))
+    raw_response: Mapped[str | None] = mapped_column(Text)
+    repairs: Mapped[int] = mapped_column(Integer, default=0)
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MediaShotRow(Base, TimestampMixin):
+    """A physical shot boundary detected without imposing an edit decision."""
+
+    __tablename__ = "media_shots"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "ordinal", name="uq_media_shots_asset_ordinal"),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("assets.id"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    timescale: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000)
+    detector: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class TranscriptRow(Base, TimestampMixin):
+    """Timed speech evidence derived from one Asset's original audio."""
+
+    __tablename__ = "transcript_segments"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_id", "ordinal", name="uq_transcript_segments_asset_ordinal"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("assets.id"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    timescale: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(32))
+    speaker: Mapped[str | None] = mapped_column(String(128))
+    emotion: Mapped[str | None] = mapped_column(String(64))
+    confidence: Mapped[float | None] = mapped_column(Float)
+    provider: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(128))
+    raw_response: Mapped[str | None] = mapped_column(Text)
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MomentRow(Base, TimestampMixin):
+    """Searchable semantic evidence over one or more complete physical shots."""
+
+    __tablename__ = "moments"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "ordinal", name="uq_moments_asset_ordinal"),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("assets.id"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_ids_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    start_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_tick: Mapped[int] = mapped_column(Integer, nullable=False)
+    timescale: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000)
+    analysis_window_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    keyframe_keys_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    technical_quality: Mapped[float | None] = mapped_column(Float)
+    sharpness: Mapped[float | None] = mapped_column(Float)
+    exposure_score: Mapped[float | None] = mapped_column(Float)
+    stability_score: Mapped[float | None] = mapped_column(Float)
+    motion_quality: Mapped[float | None] = mapped_column(Float)
+    camera_motion: Mapped[str] = mapped_column(String(64), default="unknown")
+    is_usable: Mapped[bool] = mapped_column(Boolean, default=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(256))
+    semantic_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    semantic: Mapped[str | None] = mapped_column(Text)
+    semantic_role: Mapped[str] = mapped_column(String(64), default="unknown")
+    shot_type: Mapped[str] = mapped_column(String(64), default="unknown")
+    people: Mapped[int | None] = mapped_column(Integer)
+    emotion_json: Mapped[list | None] = mapped_column(JSON)
+    interestingness: Mapped[float | None] = mapped_column(Float)
+    composition_score: Mapped[float | None] = mapped_column(Float)
+    semantic_error: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(128))
+    prompt_version: Mapped[str | None] = mapped_column(String(64))
+    raw_response: Mapped[str | None] = mapped_column(Text)
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
+    embedding_dim: Mapped[int | None] = mapped_column(Integer)
+    transcript_segment_ids_json: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    has_speech: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    asr_text: Mapped[str | None] = mapped_column(Text)
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Reference(Base, TimestampMixin):
@@ -193,6 +335,114 @@ class Render(Base, TimestampMixin):
     file_size: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class RenderArtifactRow(Base):
+    """Revision-bound derived preview or export; never authoritative state."""
+
+    __tablename__ = "render_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_render_artifacts_project_id_idempotency_key",
+        ),
+        UniqueConstraint("job_id", name="uq_render_artifacts_job_id"),
+        UniqueConstraint(
+            "review_job_id",
+            name="uq_render_artifacts_review_job_id",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    revision_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=False, index=True
+    )
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id"), nullable=False
+    )
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    quality: Mapped[str] = mapped_column(String(16), nullable=False)
+    output_start_frame: Mapped[int | None] = mapped_column(Integer)
+    output_duration_frames: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    renderer: Mapped[str] = mapped_column(String(128), nullable=False)
+    renderer_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(Text)
+    content_type: Mapped[str | None] = mapped_column(String(128))
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    file_size: Mapped[int | None] = mapped_column(Integer)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
+    render_time_ms: Mapped[int | None] = mapped_column(Integer)
+    review_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id")
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_requested"
+    )
+    review_provider: Mapped[str | None] = mapped_column(String(128))
+    review_provider_version: Mapped[str | None] = mapped_column(String(128))
+    review_context_json: Mapped[dict | None] = mapped_column(JSON)
+    review_json: Mapped[dict | None] = mapped_column(JSON)
+    review_error: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentRunRow(Base):
+    """Durable input, decision, and outputs for one autonomous Agent run."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_agent_runs_project_id_idempotency_key",
+        ),
+        UniqueConstraint("job_id", name="uq_agent_runs_job_id"),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("jobs.id"), nullable=False
+    )
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    base_revision_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    context_json: Mapped[dict | None] = mapped_column(JSON)
+    decision_json: Mapped[dict | None] = mapped_column(JSON)
+    review_json: Mapped[dict | None] = mapped_column(JSON)
+    repair_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    patch_json: Mapped[dict | None] = mapped_column(JSON)
+    result_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id")
+    )
+    render_artifact_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("render_artifacts.id")
+    )
+    render_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id")
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # --- operations --------------------------------------------------------------
@@ -284,6 +534,68 @@ class UserCorrection(Base, TimestampMixin):
 
 
 # --- interaction layer -------------------------------------------------------
+
+
+class ProjectRevisionRow(Base):
+    """Insert-only authoritative ProjectDoc snapshot."""
+
+    __tablename__ = "project_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "commit_id",
+            name="uq_project_revisions_commit_id",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    parent_revision_id: Mapped[str | None] = mapped_column(
+        String(128),
+        ForeignKey("project_revisions.id"),
+        nullable=True,
+    )
+    commit_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    document_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    document_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProjectCommitRow(Base, TimestampMixin):
+    """Mutable lifecycle row for one idempotent logical commit request."""
+
+    __tablename__ = "project_commits"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_project_commits_project_id_idempotency_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    request_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    base_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=True
+    )
+    result_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=True
+    )
+    issue_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class ProjectVersionRow(Base, TimestampMixin):

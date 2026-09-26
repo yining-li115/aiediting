@@ -29,7 +29,7 @@ from ..material import keyframes as kf
 from ..material import probe, split
 from ..providers import Role, get_provider
 from ..specs.base import new_id
-from ..specs.reference import ReferenceAnalysis, ReferenceShot, ReferenceText
+from ..specs.reference import ReferenceAnalysis, ReferenceShot, ReferenceText, StylePrior
 from ..specs.segment import RawSegment
 from ..storage import KEYFRAME, REFERENCE, get_storage, project_key, safe_name
 from . import aggregate, audio, transitions
@@ -214,6 +214,10 @@ async def _label(
         shot.semantic_role = analysed.semantic_role
         shot.motion = analysed.camera_motion
         shot.semantic = analysed.semantic
+        # TODO(review): interestingness is reused as `energy` because both
+        # are "how much is going on here", but they are not the same question
+        # and the prompt asks for neither. Reference pacing decisions rest on
+        # this value; see the TODO in providers/prompts.py.
         if analysed.interestingness is not None:
             shot.energy = analysed.interestingness
         if on_shot:
@@ -245,3 +249,25 @@ def list_references(project_id: str) -> list[tuple[str, str, bool]]:
     with session_scope() as session:
         rows = session.query(ReferenceRow).filter_by(project_id=project_id).all()
         return [(r.id, r.storage_key, bool(r.analysis_json)) for r in rows]
+
+
+def load_prior(project_id: str) -> StylePrior | None:
+    """Every analysed style reference for a project, aggregated into one prior.
+
+    Returns None when the project has no analysed references - which is the
+    normal case, not an error. A plan with no reference is a plan the model
+    decides the grammar for itself.
+    """
+    with session_scope() as session:
+        rows = (
+            session.query(ReferenceRow)
+            .filter_by(project_id=project_id)
+            .order_by(ReferenceRow.id)
+            .all()
+        )
+        payloads = [r.analysis_json for r in rows if r.analysis_json]
+
+    if not payloads:
+        return None
+    analyses = [ReferenceAnalysis.model_validate(p) for p in payloads]
+    return aggregate.build_prior(analyses, project_id=project_id)

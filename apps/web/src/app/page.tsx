@@ -1,7 +1,8 @@
 "use client";
 
 import { Film, Layers, Video } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useRef, useState } from "react";
 
 import { PromptCard } from "@/components/workspace/PromptCard";
 import {
@@ -12,7 +13,17 @@ import {
   VideoSettings,
   type Settings,
 } from "@/components/workspace/VideoSettings";
-import { DEFAULT_SETTINGS, LAYOUT, UPLOAD_LIMITS } from "@/lib/config";
+import { ApiError, createProject, uploadAssets } from "@/lib/api/client";
+import type {
+  CreateProjectRequest,
+  UploadAssetsRequest,
+} from "@/lib/api/types";
+import {
+  DEFAULT_SETTINGS,
+  LAYOUT,
+  OUTPUT_DIMENSIONS,
+  UPLOAD_LIMITS,
+} from "@/lib/config";
 
 /**
  * The workspace: everything the user gives us before a cut exists.
@@ -31,28 +42,27 @@ import { DEFAULT_SETTINGS, LAYOUT, UPLOAD_LIMITS } from "@/lib/config";
  * minutes, and what follows is a different surface - live progress, then an
  * editing view - rather than an empty box sitting on this page beforehand.
  *
- * Nothing talks to the backend yet: the upload and generate endpoints are not
- * implemented, so state is local and `onGenerate` is a no-op.
+ * Project creation commits a minimal initial revision first. The selected
+ * media is then registered in project storage and attached through one
+ * server-generated Patch, producing the next immutable revision.
  */
-
-let counter = 0;
-const nextId = () => `f_${++counter}`;
 
 function toUploaded(file: File): UploadedFile {
   return {
-    id: nextId(),
+    id: `asset_${crypto.randomUUID()}`,
     name: file.name,
+    file,
     thumbnail: file.type.startsWith("image/")
       ? URL.createObjectURL(file)
       : undefined,
-    // Duration and resolution come from the backend's probe step, so they
-    // stay unknown until upload is wired.
+    // Duration and resolution come from the backend's probe step.
     durationLabel: undefined,
     resolutionLabel: undefined,
   };
 }
 
 export default function WorkspacePage() {
+  const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [autoEnhance, setAutoEnhance] = useState(true);
   const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SETTINGS });
@@ -60,6 +70,15 @@ export default function WorkspacePage() {
   const [materials, setMaterials] = useState<UploadedFile[]>([]);
   const [styles, setStyles] = useState<UploadedFile[]>([]);
   const [remake, setRemake] = useState<UploadedFile[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pendingCreate = useRef<{
+    projectFingerprint: string;
+    createRequest: CreateProjectRequest;
+    mediaFingerprint?: string;
+    uploadRequest?: UploadAssetsRequest;
+  } | null>(null);
 
   const add =
     (
@@ -76,12 +95,144 @@ export default function WorkspacePage() {
     (id: string) =>
       setter((current) => current.filter((file) => file.id !== id));
 
-  const onGenerate = useCallback(() => {
-    // TODO 硬编码: no-op. POST /projects/{id}/generate is not implemented.
-    // When it is, this starts a job and the page hands over to the progress
-    // and editing view, subscribing with useJobStream.
-    console.warn("generate is not wired to the backend yet");
-  }, []);
+  const onGenerate = useCallback(async () => {
+    const dimensions =
+      OUTPUT_DIMENSIONS[settings.quality as keyof typeof OUTPUT_DIMENSIONS][
+        settings.aspectRatio as keyof (typeof OUTPUT_DIMENSIONS)["1080p"]
+      ];
+    const projectFingerprint = JSON.stringify({
+      prompt,
+      settings,
+      dimensions,
+      taskMode: remake.length ? "reference_remake" : "autonomous",
+    });
+    const existing = pendingCreate.current;
+    const createRequest: CreateProjectRequest =
+      existing?.projectFingerprint === projectFingerprint
+        ? existing.createRequest
+        : {
+            request_id: `request_${crypto.randomUUID()}`,
+            project_id: `project_${crypto.randomUUID()}`,
+            idempotency_key: `create_${crypto.randomUUID()}`,
+            origin: "user",
+            summary: "Project created from the Web workspace",
+            intent: {
+              task_mode: remake.length ? "reference_remake" : "autonomous",
+              target_duration_frames: settings.length * 30,
+              prompt: prompt.trim() || null,
+              style_tags: [settings.vibe],
+            },
+            output: {
+              ...dimensions,
+              fps: { num: 30, den: 1 },
+              audio_sample_rate: 48000,
+              color_space: "bt709",
+            },
+          };
+    let pending =
+      existing?.projectFingerprint === projectFingerprint
+        ? existing
+        : { projectFingerprint, createRequest };
+    pendingCreate.current = pending;
+    setCreating(true);
+    setUploadProgress(null);
+    setError(null);
+    let projectCreated = false;
+    try {
+      const created = await createProject(createRequest);
+      const initialRevision = created.revision;
+      const projectId = initialRevision?.document.project_id;
+      if (!projectId || !initialRevision) {
+        throw new Error("Project creation returned no initial revision");
+      }
+      projectCreated = true;
+      const media = [
+        ...materials.map((uploaded) => ({
+          uploaded,
+          roles: ["source"] as ["source"],
+        })),
+        ...styles.map((uploaded) => ({
+          uploaded,
+          roles: ["reference", "style_reference"] as [
+            "reference",
+            "style_reference",
+          ],
+        })),
+        ...remake.map((uploaded) => ({
+          uploaded,
+          roles: ["reference", "remake_reference"] as [
+            "reference",
+            "remake_reference",
+          ],
+        })),
+      ];
+      if (media.length) {
+        const toUploadItem = ({
+          uploaded,
+          roles,
+        }: (typeof media)[number]) => ({
+          asset_id: uploaded.id,
+          roles,
+        });
+        const uploadItems: UploadAssetsRequest["items"] = [
+          toUploadItem(media[0]),
+          ...media.slice(1).map(toUploadItem),
+        ];
+        const mediaFingerprint = JSON.stringify(
+          media.map(({ uploaded, roles }) => ({
+            id: uploaded.id,
+            name: uploaded.name,
+            size: uploaded.file.size,
+            lastModified: uploaded.file.lastModified,
+            roles,
+          })),
+        );
+        const uploadRequest: UploadAssetsRequest =
+          pending.mediaFingerprint === mediaFingerprint && pending.uploadRequest
+            ? pending.uploadRequest
+            : {
+                request_id: `request_${crypto.randomUUID()}`,
+                patch_id: `patch_${crypto.randomUUID()}`,
+                project_id: projectId,
+                base_revision_id: initialRevision.document.revision_id,
+                idempotency_key: `upload_${crypto.randomUUID()}`,
+                origin: "user",
+                summary: "Add media uploaded from the Web workspace",
+                items: uploadItems,
+              };
+        pending = {
+          ...pending,
+          mediaFingerprint,
+          uploadRequest,
+        };
+        pendingCreate.current = pending;
+        setUploadProgress(0);
+        const uploaded = await uploadAssets(
+          projectId,
+          uploadRequest,
+          media.map(({ uploaded: item }) => item.file),
+          setUploadProgress,
+        );
+        if (!uploaded.revision) {
+          throw new Error("Media upload returned no committed revision");
+        }
+      }
+      pendingCreate.current = null;
+      router.push(`/projects/${encodeURIComponent(projectId)}`);
+    } catch (cause) {
+      if (cause instanceof ApiError && !cause.retryable && !projectCreated) {
+        pendingCreate.current = null;
+      }
+      setError(
+        cause instanceof ApiError
+          ? cause.detail
+          : "Project setup did not complete. Retry to reuse the same request safely.",
+      );
+    } finally {
+      setCreating(false);
+      setUploadProgress(null);
+    }
+  }, [materials, prompt, remake, router, settings, styles]);
 
   return (
     <div
@@ -94,6 +245,12 @@ export default function WorkspacePage() {
         autoEnhance={autoEnhance}
         onAutoEnhanceChange={setAutoEnhance}
       />
+
+      {error && (
+        <p className="rounded-[var(--radius-control)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </p>
+      )}
 
       {/* Side by side on a wide screen, stacked below it. The settings panel
           gets a floor and a ceiling rather than a fixed width, so it stays
@@ -161,7 +318,13 @@ export default function WorkspacePage() {
             settings={settings}
             onChange={setSettings}
             onGenerate={onGenerate}
-            disabled={materials.length === 0}
+            generating={creating}
+            actionLabel="Create Project"
+            busyLabel={
+              uploadProgress === null
+                ? "Creating Project..."
+                : `Uploading Media... ${Math.round(uploadProgress * 100)}%`
+            }
           />
         </div>
       </div>

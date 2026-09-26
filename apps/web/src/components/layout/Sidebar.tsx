@@ -10,6 +10,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 import { APP_NAME, CREDITS, LAYOUT } from "@/lib/config";
@@ -48,13 +49,13 @@ export function Sidebar() {
       </div>
 
       <div className="px-4 pb-1 pt-2">
-        <button
-          type="button"
+        <Link
+          href="/"
           className="flex h-10 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-line-strong text-[13.5px] font-medium text-ink transition-colors hover:bg-canvas"
         >
           <Plus size={16} />
           New Project
-        </button>
+        </Link>
       </div>
 
       <nav className="flex flex-col gap-0.5 px-4 pt-3">

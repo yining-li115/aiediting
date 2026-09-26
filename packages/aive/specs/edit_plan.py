@@ -26,16 +26,84 @@ from .enums import (
 )
 
 
+class RhythmPreference(Spec):
+    """Pace the user asked for, which is not the same as pace we decided on.
+
+    Separate from ``Rhythm`` on purpose: that one is a decision the plan makes,
+    this one is a request the plan has to honour. ``opening_pace`` exists
+    because "开头别太快" is a common instruction that a single whole-film pace
+    cannot express.
+    """
+
+    overall_pace: Pace | None = None
+    opening_pace: Pace | None = None
+    # 0..1, or None when the user said nothing about transitions.
+    transition_density: float | None = None
+
+
+class ContentPreference(Spec):
+    """What the user wants more or less of, in their own words.
+
+    Free text rather than an enum: "多给我朋友的镜头" and "少拍地面的" are
+    open-vocabulary and are consumed by matching against segment descriptions,
+    not by a lookup table.
+    """
+
+    prioritize: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+
+
+class TextPreference(Spec):
+    subtitle_density: SubtitleDensity | None = None
+
+
+class AudioPreference(Spec):
+    music_preference: str | None = None
+    keep_original_audio: bool | None = None
+    use_music: bool | None = None
+
+
 class Intent(Spec):
-    """What the user asked for."""
+    """What the user asked for.
+
+    **None means "did not say", and that is load-bearing.** The precedence
+    rules (see planner.merge) let an explicit user instruction override a
+    reference video, and that is only expressible if silence is distinguishable
+    from a stated preference. A default written into this object at parse time
+    would look exactly like the user having asked for it, and would then beat
+    the reference it was never meant to beat.
+
+    ``target_duration`` is the exception: too much code reads it as a plain
+    float, so it stays resolved and ``duration_stated`` carries whether the
+    user actually said a length.
+    """
 
     target_duration: float = 45.0
+    duration_stated: bool = False
     duration_tolerance: float = 0.15  # fraction of target_duration
     aspect_ratio: str = "9:16"
     platform: str | None = None
+
+    # Split from `style` because they are different axes and get used
+    # differently: mood feeds emotion matching on the material side, style
+    # feeds the cutting grammar on the plan side.
+    mood: list[str] = Field(default_factory=list)
     style: list[str] = Field(default_factory=list)
+    # "不要很网红感". Not the absence of a style tag - an instruction to avoid
+    # one - so it cannot be represented by leaving `style` empty.
+    negative_style: list[str] = Field(default_factory=list)
+    content_type: str | None = None
+
+    rhythm: RhythmPreference = Field(default_factory=RhythmPreference)
+    content: ContentPreference = Field(default_factory=ContentPreference)
+    text: TextPreference = Field(default_factory=TextPreference)
+    audio: AudioPreference = Field(default_factory=AudioPreference)
+
     user_constraints: list[str] = Field(default_factory=list)
     language: str = "zh"
+    # Kept so the agent layer can quote what the user actually said rather than
+    # paraphrasing its own extraction back at them.
+    raw_prompt: str | None = None
 
 
 class Section(Spec):

@@ -21,6 +21,11 @@ from ..specs.edit_plan import EditPlanSpec, Intent, Section, Slot, Story
 from ..specs.enums import CameraMotion, SemanticRole, ShotType
 from ..specs.operations import EditCommandPlan, EditOperation
 from ..specs.segment import MaterialSegment, RawSegment
+from ..contracts.moments import (
+    MomentGroupDecision,
+    ShotObservation,
+    TranscriptDraft,
+)
 from .base import BaseProvider, Role
 
 _ROLES: tuple[SemanticRole, ...] = (
@@ -50,12 +55,20 @@ class MockMaterialProvider(BaseProvider):
     name = "mock"
 
     async def analyze_segment(
-        self, segment: RawSegment, keyframes: list[Path]
+        self,
+        segment: RawSegment,
+        keyframes: list[Path],
+        clip: Path | None = None,
     ) -> MaterialSegment:
         async def _run() -> MaterialSegment:
             rng = _rng(segment.segment_id)
             role = _ROLES[int(rng.integers(len(_ROLES)))]
             shot = _SHOTS[int(rng.integers(len(_SHOTS)))]
+            # Recorded as loudly as a real one: a row whose provenance says
+            # "mock" is the difference between a label and a placeholder.
+            self.report_provenance(
+                raw_response=f"mock: seeded from {segment.segment_id}",
+            )
             return MaterialSegment(
                 segment_id=segment.segment_id,
                 project_id=segment.project_id,
@@ -65,7 +78,6 @@ class MockMaterialProvider(BaseProvider):
                 semantic=f"mock description of a {shot} {role} shot",
                 semantic_role=role,
                 shot_type=shot,
-                camera_motion=_MOTIONS[int(rng.integers(len(_MOTIONS)))],
                 people=int(rng.integers(0, 3)),
                 interestingness=float(rng.uniform(0.3, 0.95)),
                 emotion=["warm"] if rng.random() > 0.5 else ["calm"],
@@ -73,6 +85,40 @@ class MockMaterialProvider(BaseProvider):
             )
 
         return await self._guarded(_run, seconds_processed=segment.duration)
+
+    async def group_moments(
+        self, shots: tuple[ShotObservation, ...]
+    ) -> tuple[MomentGroupDecision, ...]:
+        """Group consecutive speech shots; silent shots stay independently usable."""
+        groups: list[MomentGroupDecision] = []
+        index = 0
+        while index < len(shots):
+            current = shots[index]
+            run = [current]
+            if current.transcript:
+                while index + 1 < len(shots) and shots[index + 1].transcript:
+                    index += 1
+                    run.append(shots[index])
+            descriptions = [
+                item.visual_semantic for item in run if item.visual_semantic
+            ]
+            transcript = " ".join(
+                item.transcript or "" for item in run
+            ).strip()
+            groups.append(
+                MomentGroupDecision(
+                    shot_ids=tuple(item.shot_id for item in run),
+                    semantic=(
+                        transcript
+                        or "; ".join(descriptions)
+                        or "unlabelled visual moment"
+                    )[:500],
+                    semantic_role=run[0].semantic_role,
+                )
+            )
+            index += 1
+        self.report_provenance(raw_response="mock: grouped consecutive speech shots")
+        return tuple(groups)
 
 
 class MockReferenceProvider(BaseProvider):
@@ -88,11 +134,14 @@ class MockReferenceProvider(BaseProvider):
     name = "mock"
 
     async def analyze_segment(
-        self, segment: RawSegment, keyframes: list[Path]
+        self,
+        segment: RawSegment,
+        keyframes: list[Path],
+        clip: Path | None = None,
     ) -> MaterialSegment:
         return await MockMaterialProvider(
             project_id=self.project_id
-        ).analyze_segment(segment, keyframes)
+        ).analyze_segment(segment, keyframes, clip)
 
     async def analyze(
         self, video: Path, shots: list[tuple[float, float]] | None = None
@@ -124,6 +173,27 @@ class MockReferenceProvider(BaseProvider):
         return await self._guarded(_run)
 
 
+class MockIntentProvider(BaseProvider):
+    """Role 3a without a model.
+
+    Delegates to the rule parser rather than inventing an answer: a mock that
+    returns something a rule pass would not is a mock that hides bugs, and the
+    rule parser is the real fallback anyway.
+    """
+
+    role = Role.INTENT
+    name = "mock"
+
+    async def parse_intent(self, prompt: str) -> Intent:
+        async def _run() -> Intent:
+            from ..planner.intent import parse_intent_rules  # noqa: PLC0415
+
+            self._finish()
+            return parse_intent_rules(prompt)
+
+        return await self._guarded(_run)
+
+
 class MockPlannerProvider(BaseProvider):
     """Produces structurally valid plans with the same explicit perturbation
     strategy the real planner uses, so downstream code can be exercised without
@@ -137,7 +207,11 @@ class MockPlannerProvider(BaseProvider):
     ) -> list[EditPlanSpec]:
         async def _run() -> list[EditPlanSpec]:
             project_id = context.get("project_id", "proj_mock")
-            target = float(context.get("target_duration", 45.0))
+            conditioning = context.get("conditioning")
+            target = float(
+                context.get("target_duration")
+                or (conditioning.target_duration if conditioning else 45.0)
+            )
             plans: list[EditPlanSpec] = []
             for index in range(n):
                 # Candidates differ by construction, not by sampling
@@ -160,7 +234,7 @@ class MockPlannerProvider(BaseProvider):
                 ]
                 plan = EditPlanSpec(
                     project_id=project_id,
-                    intent=Intent(target_duration=target),
+                    intent=context.get("intent") or Intent(target_duration=target),
                     story=Story(
                         sections=[
                             Section(name="opening", target_duration=target * 0.2),
@@ -256,8 +330,8 @@ class MockASRProvider(BaseProvider):
     role = Role.ASR
     name = "mock"
 
-    async def transcribe(self, audio: Path) -> list[dict[str, Any]]:
-        async def _run() -> list[dict[str, Any]]:
-            return []
+    async def transcribe(self, audio: Path) -> tuple[TranscriptDraft, ...]:
+        async def _run() -> tuple[TranscriptDraft, ...]:
+            return ()
 
         return await self._guarded(_run)

@@ -11,6 +11,7 @@ clamped to [0, 1] so they can be combined without further normalisation.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 import cv2
@@ -60,6 +61,8 @@ class QualityMetrics:
     motion_quality: float | None
     technical_quality: float
     flat_frame_ratio: float  # fraction of near-black / near-white frames
+    # Computed here rather than asked of the model: see classify_motion.
+    camera_motion: str = "unknown"
 
     def as_dict(self) -> dict[str, float | None]:
         return {
@@ -102,6 +105,135 @@ def exposure_of(gray: np.ndarray) -> tuple[float, bool]:
     score = _clip01(1.0 - (2.0 * abs(mean - 0.5) + clipped))
     is_flat = clipped > 0.9 or normalised.std() < 0.02
     return score, is_flat
+
+
+# TODO(review): thresholds for reading camera movement out of optical flow.
+# A pan is "most tracked points moving the same way"; a push is "most points
+# moving away from the centre". The numbers below say how much agreement
+# counts as "most" and how fast is "fast". Chosen from how handheld phone
+# footage behaves; never checked against a labelled set.
+MOTION_COHERENCE = 0.55  # fraction of points agreeing on a direction
+MOTION_MIN_MAGNITUDE = 0.0015  # per-frame, as a fraction of frame width
+MOTION_FAST_MAGNITUDE = 0.010
+ZOOM_MIN_RATE = 0.0020  # per-frame change in mean radius from centre
+# TODO(review): how much of a shot must agree before a label is claimed.
+# Below this the shot is reported as unknown rather than as a plurality guess.
+MOTION_VOTE_MAJORITY = 0.5
+
+
+def _flow_vectors(frames: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(origins, displacements) per frame pair, in pixels."""
+    out: list[tuple[np.ndarray, np.ndarray]] = []
+    for previous, current in zip(frames, frames[1:]):
+        corners = cv2.goodFeaturesToTrack(
+            previous, maxCorners=80, qualityLevel=0.01, minDistance=8
+        )
+        if corners is None or len(corners) < 6:
+            continue
+        moved, status, _ = cv2.calcOpticalFlowPyrLK(previous, current, corners, None)
+        if moved is None or status is None:
+            continue
+        keep = status.reshape(-1).astype(bool)
+        if keep.sum() < 6:
+            continue
+        origins = corners.reshape(-1, 2)[keep]
+        out.append((origins, moved.reshape(-1, 2)[keep] - origins))
+    return out
+
+
+def classify_motion(frames_by_burst: list[list[np.ndarray]]) -> str:
+    """Read camera movement out of the flow field.
+
+    Computed rather than asked of a model, for the same reason shot boundaries
+    are: it is exactly measurable. And a single frame - all the material model
+    sees - contains no motion at all, so a model asked for this field can only
+    infer it from content, which is how a street scene becomes "handheld"
+    whether or not the camera moved.
+
+    Two known limits, both inherent rather than fixable by tuning:
+
+    * A pan and a tracking shot produce the same uniform flow. Telling them
+      apart needs parallax, which is not reliable at this scale, so both are
+      reported as a pan. The matcher treats pan and tracking as related
+      (motion_affinity), so the confusion is survivable.
+    * A moving subject in a locked-off frame looks like camera movement if it
+      fills enough of the frame. That is what the coherence test is for: a
+      subject moves alone, a camera moves everything.
+    """
+    if not frames_by_burst:
+        return "unknown"
+
+    votes: list[str] = []
+    for burst in frames_by_burst:
+        pairs = _flow_vectors(burst)
+        if not pairs:
+            continue
+        width = burst[0].shape[1]
+        centre = np.array(
+            [width / 2, burst[0].shape[0] / 2], dtype=np.float32
+        )
+
+        for origins, deltas in pairs:
+            magnitudes = np.linalg.norm(deltas, axis=1) / max(width, 1)
+            median_magnitude = float(np.median(magnitudes))
+            if median_magnitude < MOTION_MIN_MAGNITUDE:
+                votes.append("static")
+                continue
+
+            # How well does a single translation explain the field?
+            mean_delta = np.median(deltas, axis=0)
+            translation_agreement = 0.0
+            if np.linalg.norm(mean_delta) > 1e-6:
+                direction = mean_delta / np.linalg.norm(mean_delta)
+                translation_agreement = float(np.mean(deltas @ direction > 0))
+
+            # How well does expansion or contraction about the centre?
+            radial_agreement, zoom_rate = 0.0, 0.0
+            radial = origins - centre
+            radial_norm = np.linalg.norm(radial, axis=1)
+            usable = radial_norm > 1e-3
+            if usable.sum() >= 6:
+                unit = radial[usable] / radial_norm[usable, None]
+                outward = np.sum(deltas[usable] * unit, axis=1) / max(width, 1)
+                zoom_rate = float(np.median(outward))
+                if abs(zoom_rate) > 1e-9:
+                    radial_agreement = float(
+                        np.mean(np.sign(outward) == np.sign(zoom_rate))
+                    )
+
+            # Whichever model explains more of the field wins. Testing radial
+            # first instead lets a strongly translating field pass the zoom
+            # threshold by accident - which is exactly what a walking shot did.
+            if (
+                radial_agreement > translation_agreement
+                and radial_agreement > MOTION_COHERENCE
+                and abs(zoom_rate) > ZOOM_MIN_RATE
+            ):
+                votes.append("zoom_in" if zoom_rate > 0 else "zoom_out")
+            elif translation_agreement > MOTION_COHERENCE:
+                votes.append(
+                    "fast_pan"
+                    if median_magnitude > MOTION_FAST_MAGNITUDE
+                    else "slow_pan"
+                    if abs(mean_delta[0]) >= abs(mean_delta[1])
+                    else "tilt"
+                )
+            else:
+                # Nothing explains the field: points disagree, which is an
+                # unsteady hand or a subject moving inside a still frame.
+                votes.append("handheld")
+
+    if not votes:
+        return "unknown"
+
+    counts = Counter(votes)
+    winner, count = counts.most_common(1)[0]
+    # A shot whose bursts disagree has no single camera movement. Reporting
+    # the plurality would be a confident wrong label, and the matcher already
+    # treats "unknown" as a weak match rather than a bad one.
+    if count / len(votes) < MOTION_VOTE_MAJORITY:
+        return "unknown"
+    return winner
 
 
 def _displacements(frames: list[np.ndarray]) -> np.ndarray:
@@ -201,7 +333,7 @@ def measure_photo(image_path: str) -> QualityMetrics:
     """
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if image is None:
-        return QualityMetrics(0.0, 0.0, None, None, 0.0, 1.0)
+        return QualityMetrics(0.0, 0.0, None, None, 0.0, 1.0, "static")
 
     sharpness = sharpness_of(image)
     exposure, is_flat = exposure_of(image)
@@ -215,6 +347,9 @@ def measure_photo(image_path: str) -> QualityMetrics:
         motion_quality=None,
         technical_quality=round(technical, 4),
         flat_frame_ratio=1.0 if is_flat else 0.0,
+        # A still cannot move. Ken Burns, if added, is applied at render time
+        # from slot.motion, not a property of the source.
+        camera_motion="static",
     )
 
 
@@ -223,7 +358,7 @@ def measure(video_path: str, start: float, end: float) -> QualityMetrics:
     if not frames:
         # Unreadable range: report the worst score rather than a neutral one,
         # so it gets rejected instead of silently competing with real footage.
-        return QualityMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        return QualityMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "unknown")
 
     sharpness = float(np.median([sharpness_of(f) for f in frames]))
 
@@ -236,6 +371,7 @@ def measure(video_path: str, start: float, end: float) -> QualityMetrics:
     flat_ratio = float(np.mean(flats))
 
     bursts = sample_motion_bursts(video_path, start, end)
+    camera_motion = classify_motion(bursts)
     per_burst = [_displacements(burst) for burst in bursts]
     displacements = np.concatenate([d for d in per_burst if d.size]) if any(
         d.size for d in per_burst
@@ -265,4 +401,5 @@ def measure(video_path: str, start: float, end: float) -> QualityMetrics:
         motion_quality=round(motion, 4),
         technical_quality=round(technical, 4),
         flat_frame_ratio=round(flat_ratio, 4),
+        camera_motion=camera_motion,
     )

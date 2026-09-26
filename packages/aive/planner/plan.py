@@ -29,6 +29,7 @@ from ..specs.edit_plan import (
     TextPlan,
 )
 from ..specs.enums import Pace, SemanticRole, ShotType
+from .merge import Conditioning
 from .variants import Variant, pick
 
 # A travel/daily vlog arc. Sections are dropped when the pool cannot fill them,
@@ -48,14 +49,33 @@ BASE_SHOT_SECONDS = 1.5
 MIN_SLOT = 0.6
 MAX_SLOT = 4.0
 
+# TODO(review): the inverse of pace_for - a pace name back into a shot length.
+# Each value is the middle of that rung's band, so the two round-trip. Guesses,
+# like the ladder itself; validate by whether a viewer asked to sort cuts by
+# speed agrees with the labels.
+PACE_SECONDS: dict[str, float] = {
+    "fast": 0.75,
+    "medium_fast": 1.1,
+    "medium": 1.6,
+    "slow": 2.6,
+}
+
 
 @dataclass
 class PlanningContext:
-    """Everything the planner is allowed to know."""
+    """Everything the planner is allowed to know.
+
+    ``conditioning`` is the merged answer - user instruction, reference style
+    and defaults already resolved against each other by ``planner.merge``. It
+    is optional only so that older call sites and tests keep working; when it
+    is present it wins over ``intent`` for every field it covers, because it
+    already took ``intent`` into account and knows things intent does not.
+    """
 
     project_id: str
     intent: Intent
     pool_summary: dict
+    conditioning: "Conditioning | None" = None
 
     def available_roles(self) -> dict[str, float]:
         by_role = self.pool_summary.get("by_semantic_role", {})
@@ -65,7 +85,8 @@ class PlanningContext:
         return float(self.pool_summary.get("total_usable_duration", 0.0))
 
 
-def _pace_for(shot_seconds: float) -> Pace:
+def pace_for(shot_seconds: float) -> Pace:
+    """Shot length -> pace label. The inverse of PACE_SECONDS."""
     if shot_seconds <= 0.9:
         return "fast"
     if shot_seconds <= 1.3:
@@ -181,6 +202,21 @@ def build_plan(
     pace_factor, transition_density = _apply_constraints(intent, variant)
     shot_seconds = BASE_SHOT_SECONDS * pace_factor
 
+    cond = context.conditioning
+    if cond is not None:
+        # Same reason as in draft.to_plan: the merge owns the length.
+        intent.target_duration = cond.target_duration
+        intent.duration_tolerance = cond.duration_tolerance
+        # The merge already weighed the user against the reference and the
+        # defaults; re-deriving pace from intent alone here would quietly throw
+        # the reference away, which is the difference between a fallback that
+        # is worse and one that is wrong.
+        if cond.shot_duration is not None and cond.shot_duration.median > 0:
+            shot_seconds = cond.shot_duration.median * variant.pace_factor
+        else:
+            shot_seconds = PACE_SECONDS[cond.pace] * variant.pace_factor
+        transition_density = cond.transition_density
+
     sections = _plan_sections(context, variant)
     target = intent.target_duration
 
@@ -239,7 +275,7 @@ def build_plan(
         ),
         slots=slots,
         rhythm=Rhythm(
-            pace=_pace_for(shot_seconds),
+            pace=pace_for(shot_seconds),
             transition_density=round(transition_density, 3),
             music_sync_strength=variant.music_sync_strength,
             beat_alignment="soft" if variant.music_sync_strength >= 0.6 else "none",

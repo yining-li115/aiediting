@@ -33,8 +33,11 @@ _MINUTES = re.compile(r"(\d+(?:\.\d+)?)\s*(?:分钟|分|min\b|minutes?)", re.I)
 _STYLE_WORDS: dict[str, tuple[str, ...]] = {
     "travel": ("旅行", "旅游", "travel", "trip", "vlog"),
     "daily": ("日常", "生活", "daily", "everyday"),
-    "relaxed": ("轻松", "放松", "chill", "relaxed", "慢"),
-    "energetic": ("活力", "动感", "快节奏", "energetic", "upbeat", "快"),
+    # No bare "快"/"慢": they are substrings of the negations that mean the
+    # opposite. "开头别太快" contains 快 and would have tagged a chill request
+    # as energetic - which it did, on the first real run.
+    "relaxed": ("轻松", "放松", "chill", "relaxed", "慢节奏"),
+    "energetic": ("活力", "动感", "快节奏", "energetic", "upbeat"),
     "cinematic": ("电影感", "氛围感", "cinematic", "moody"),
     "minimal": ("简洁", "干净", "minimal", "clean", "简单"),
     "warm": ("温暖", "温馨", "warm", "cozy"),
@@ -96,17 +99,18 @@ def parse_intent_rules(
 ) -> Intent:
     """Deterministic extraction. Always succeeds, never calls a model."""
     text = prompt or ""
-    duration = target_duration or parse_duration(text) or DEFAULT_DURATION
-    styles = parse_styles(text)
-    if not styles:
-        # Travel/daily vlog is the only supported category, so an unhinted
-        # prompt gets the category default rather than an empty style list.
-        styles = ["travel"]
+    stated = parse_duration(text)
+    duration = target_duration or stated or DEFAULT_DURATION
+    # An unhinted prompt gets an empty style list, not a category default.
+    # Filling one in would be indistinguishable downstream from the user
+    # having asked for it, and would then outrank their reference video.
     return Intent(
         target_duration=max(MIN_DURATION, min(MAX_DURATION, duration)),
+        duration_stated=target_duration is not None or stated is not None,
         aspect_ratio=aspect_ratio,
-        style=styles,
+        style=parse_styles(text),
         user_constraints=parse_constraints(text),
+        raw_prompt=prompt,
     )
 
 
@@ -135,9 +139,11 @@ async def parse_intent(
         return rule_based
     if target_duration is not None:
         parsed.target_duration = target_duration
+        parsed.duration_stated = True
     parsed.target_duration = max(
         MIN_DURATION, min(MAX_DURATION, parsed.target_duration)
     )
+    parsed.raw_prompt = parsed.raw_prompt or prompt
     if not parsed.style:
         parsed.style = rule_based.style
     # Rule-detected constraints are unioned in: the model dropping "不要太多

@@ -7,7 +7,7 @@ src/
 ├── components/             Presentational components
 └── lib/
     ├── api/
-    │   ├── types.ts        GENERATED from packages/aive/specs - do not edit
+    │   ├── types.ts        GENERATED from backend contracts - do not edit
     │   ├── schema.json     GENERATED - the JSON Schema types.ts comes from
     │   └── client.ts       Typed fetch layer + job polling
     └── hooks/
@@ -36,9 +36,14 @@ carries a sequence id; `EventSource` sends the last one back on reconnect and
 the server replays from there. A page reloaded mid-job catches up. Do not
 "optimise" this by dropping the id.
 
-**Surface what the backend skipped.** Uploads report a `skipped` list. Showing
-"30 files imported" while quietly dropping 15 is how a user loses footage
-without knowing it.
+**Surface every upload rejection.** Media validation is all-or-nothing and the
+API returns a typed issue for every rejected file. Showing a generic success
+while quietly dropping footage is not allowed.
+
+**Read media readiness from the Asset API, not ProjectDoc.** Proxy and
+thumbnail generation changes `uploaded / processing / ready / failed` state
+without creating a creative edit. Poll `listProjectAssets` while work is
+active so a page reload can recover the current durable state.
 
 **Files are served by the API, never by a storage path.** Use `mediaUrl(key)`.
 Storage keys are backend-internal and will stop being local paths as soon as
@@ -50,4 +55,4 @@ the backend moves to object storage.
 npm run types        # from apps/web
 ```
 
-Run it after any change under `packages/aive/specs/`.
+Run it after a change to an exported backend contract or API response envelope.

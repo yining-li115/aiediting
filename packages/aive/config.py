@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     # Model selection lives in aive.model_registry, not here. Per-role
     # overrides go through AIVE_ROLE_<ROLE>_MODEL, which that module reads.
 
+    # What the material model is shown for each segment.
+    #   frame   the middle keyframe only
+    #   frames  first, middle and last keyframes
+    #   clip    the segment itself, cut from the analysis proxy
+    # A still cannot show which moment in a shot is the good one, which is
+    # exactly what interestingness and worth_using are judging. Models that
+    # do not accept video fall back to frames automatically.
+    material_input: str = "frame"
+
     # --- generation defaults ---
     candidate_count: int = 6  # N in best-of-N
     top_k_proxy: int = 3  # K survivors that get a proxy render

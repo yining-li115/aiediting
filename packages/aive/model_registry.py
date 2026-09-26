@@ -74,12 +74,31 @@ class ModelCard:
     requests_per_minute: int | None = None
     base_url_env: str | None = None
     api_key_env: str | None = None
+    # Some vendors are addressed by an endpoint id created in their console
+    # rather than by a public model name. Reading it from the environment
+    # keeps ids that only exist in one account out of the source tree.
+    model_id_env: str | None = None
+
+    # True when content sent through this endpoint may be used by the vendor
+    # for training or analysis - for example an endpoint enrolled in a
+    # data-for-credits programme. This is not a note: real user footage must
+    # never reach one of these, and that has to be enforced rather than
+    # remembered.
+    data_shared_with_vendor: bool = False
 
     notes: str = ""
     unknowns: tuple[str, ...] = field(default_factory=tuple)
 
     def is_usable_offline(self) -> bool:
         return self.adapter in ("mock", "passthrough", "local_openclip")
+
+    def resolved_model_id(self) -> str:
+        """The id to send, taking an environment override into account."""
+        if self.model_id_env:
+            from_env = os.environ.get(self.model_id_env, "").strip()
+            if from_env:
+                return from_env
+        return self.model_id
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +128,14 @@ _add(
         roles=(
             Role.MATERIAL,
             Role.REFERENCE,
+            Role.INTENT,
             Role.PLANNER,
             Role.EMBEDDING,
             Role.RERANK,
             Role.AGENT_FAST,
             Role.AGENT_DEEP,
+            Role.DIRECTOR,
+            Role.REVIEWER,
             Role.ASR,
         ),
         status="provisional",
@@ -168,7 +190,7 @@ _add(
         vendor="alibaba-bailian",
         model_id="qwen3.7-plus-2026-05-26",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.REFERENCE, Role.PLANNER),
+        roles=(Role.MATERIAL, Role.REFERENCE, Role.INTENT, Role.PLANNER),
         status="provisional",
         accepts_video=True,
         accepts_images=True,
@@ -195,7 +217,14 @@ _add(
         vendor="bytedance-volcengine",
         model_id="TBD-console-confirm",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.REFERENCE),
+        roles=(
+            Role.MATERIAL,
+            Role.REFERENCE,
+            Role.INTENT,
+            Role.PLANNER,
+            Role.DIRECTOR,
+            Role.REVIEWER,
+        ),
         status="challenger",
         accepts_video=True,
         reads_video_audio=True,
@@ -213,7 +242,13 @@ _add(
         vendor="google",
         model_id="gemini-3.7-flash",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.REFERENCE, Role.PLANNER, Role.CRITIC),
+        roles=(
+            Role.MATERIAL,
+            Role.REFERENCE,
+            Role.INTENT,
+            Role.PLANNER,
+            Role.CRITIC,
+        ),
         status="provisional",
         accepts_video=True,
         accepts_images=True,
@@ -287,7 +322,7 @@ _add(
         vendor="openai",
         model_id="gpt-5.6-terra",
         adapter="openai_compatible",
-        roles=(Role.PLANNER, Role.AGENT_DEEP),
+        roles=(Role.INTENT, Role.PLANNER, Role.AGENT_DEEP),
         status="challenger",
         accepts_images=True,
         accepts_video=False,  # no raw video input: excluded from roles 1 and 2
@@ -301,6 +336,88 @@ _add(
         ),
     )
 )
+
+# Volcengine Ark. Two cards for one vendor, because the difference that
+# matters is not the model but whether the endpoint shares its traffic.
+#
+# The reward-plan endpoint buys free tokens with data authorisation. That is a
+# fair trade for our own test footage and a bad one for a user's holiday video,
+# so the two are separate cards and the split is enforced in code (see
+# check_data_policy below) rather than left to whoever is switching configs.
+
+_add(
+    ModelCard(
+        key="doubao-vision-dev",
+        vendor="bytedance-volcengine",
+        # Filled from the console via AIVE_ARK_DEV_MODEL_ID: on Ark this is
+        # usually an endpoint id (ep-...) that exists only in one account.
+        model_id="TBD-set-AIVE_ARK_DEV_MODEL_ID",
+        model_id_env="AIVE_ARK_DEV_MODEL_ID",
+        adapter="openai_compatible",
+        roles=(
+            Role.MATERIAL,
+            Role.REFERENCE,
+            Role.INTENT,
+            Role.PLANNER,
+            Role.DIRECTOR,
+            Role.REVIEWER,
+        ),
+        status="challenger",
+        accepts_images=True,
+        accepts_video=True,
+        structured_output=True,
+        base_url_env="AIVE_ARK_BASE_URL",
+        api_key_env="AIVE_ARK_API_KEY",
+        data_shared_with_vendor=True,
+        # Confirmed in the console: 30,000 requests and 5,000,000 tokens per
+        # minute. Neither binds - at ~2,900 tokens and ~23s per call, saturating
+        # the token limit would need roughly 670 concurrent requests. Recorded
+        # anyway so the limiter has a real number rather than an assumption,
+        # and so the next model's figures can be compared against something.
+        requests_per_minute=30_000,
+        notes=(
+            "Development endpoint enrolled in the Ark reward plan. For our own "
+            "test footage, synthetic data, bake-offs and prompt work only. "
+            "The binding budget is the reward plan's daily allowance, not the "
+            "per-minute limits: 2M tokens/day is about 14 projects of 50 "
+            "segments, so re-running a whole analysis to try a prompt change "
+            "is not free."
+        ),
+        unknowns=(
+            "whether the reward plan covers vision models at all",
+            "how long the free allowance lasts",
+            "whether the data authorisation covers uploaded images themselves",
+        ),
+    )
+)
+
+_add(
+    ModelCard(
+        key="doubao-vision",
+        vendor="bytedance-volcengine",
+        model_id="TBD-set-AIVE_ARK_MODEL_ID",
+        model_id_env="AIVE_ARK_MODEL_ID",
+        adapter="openai_compatible",
+        roles=(
+            Role.MATERIAL,
+            Role.REFERENCE,
+            Role.INTENT,
+            Role.PLANNER,
+            Role.DIRECTOR,
+            Role.REVIEWER,
+        ),
+        status="challenger",
+        accepts_images=True,
+        accepts_video=True,
+        structured_output=True,
+        base_url_env="AIVE_ARK_BASE_URL",
+        api_key_env="AIVE_ARK_API_KEY",
+        data_shared_with_vendor=False,
+        notes="Production endpoint. Must NOT be enrolled in the reward plan.",
+        unknowns=("exact endpoint id from the console",),
+    )
+)
+
 
 # --- retrieval (role 4) ----------------------------------------------------
 
@@ -365,14 +482,18 @@ _add(
     ModelCard(
         key="qwen-asr",
         vendor="alibaba-bailian",
-        model_id="qwen-audio-3.0-asr-flash-filetrans",
+        model_id="qwen3-asr-flash",
         adapter="openai_compatible",
         roles=(Role.ASR,),
         status="provisional",
         base_url_env="AIVE_BAILIAN_BASE_URL",
         api_key_env="AIVE_BAILIAN_API_KEY",
-        notes="Supplies speech and word timing that the video models do not.",
-        unknowns=("diarization and timestamp accuracy on real footage",),
+        notes=(
+            "OpenAI-compatible Base64 audio transcription. The endpoint does "
+            "not return timestamps, so the media service calls it with bounded "
+            "physical-shot audio windows and owns the source timing."
+        ),
+        unknowns=("accuracy on noisy handheld footage",),
     )
 )
 
@@ -388,12 +509,15 @@ _add(
 ACTIVE_STACK: dict[Role, str] = {
     Role.MATERIAL: "gemini-3.7-flash",
     Role.REFERENCE: "mock",
+    Role.INTENT: "gemini-3.7-flash",
     Role.PLANNER: "gemini-3.7-flash",
     Role.EMBEDDING: "mock",
     Role.RERANK: "mock",
     Role.CRITIC: "passthrough",
     Role.AGENT_FAST: "mock",
     Role.AGENT_DEEP: "mock",
+    Role.DIRECTOR: "mock",
+    Role.REVIEWER: "mock",
     Role.ASR: "mock",
 }
 
@@ -435,6 +559,30 @@ def open_unknowns() -> dict[str, tuple[str, ...]]:
     return {c.key: c.unknowns for c in CATALOG.values() if c.unknowns}
 
 
+class DataPolicyViolation(RuntimeError):
+    """Real user content was about to go through a data-sharing endpoint."""
+
+
+def check_data_policy(role: Role, contains_user_data: bool) -> None:
+    """Refuse to send user content through an endpoint that shares it.
+
+    Configuration discipline is not enough here. Someone debugging a user's
+    report will run their footage through whatever is currently selected, and
+    if that happens to be the reward endpoint the material has been authorised
+    away with nothing to notice it. So the combination raises instead.
+    """
+    if not contains_user_data:
+        return
+    card = card_for(role)
+    if card.data_shared_with_vendor:
+        raise DataPolicyViolation(
+            f"{card.key} shares its traffic with {card.vendor} (reward plan or "
+            f"similar), so user content must not go through it. Switch "
+            f"AIVE_ROLE_{role.name}_MODEL to a non-sharing endpoint, or mark "
+            f"this project as internal test material."
+        )
+
+
 def stack_summary() -> list[dict[str, str]]:
     rows = []
     for role in Role:
@@ -447,10 +595,11 @@ def stack_summary() -> list[dict[str, str]]:
             {
                 "role": role.value,
                 "key": card.key,
-                "model": card.model_id,
+                "model": card.resolved_model_id(),
                 "vendor": card.vendor,
                 "adapter": card.adapter,
                 "status": card.status,
+                "shared": card.data_shared_with_vendor,
             }
         )
     return rows

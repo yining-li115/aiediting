@@ -23,19 +23,32 @@ import asyncio
 import base64
 import json
 import os
+import wave
 from pathlib import Path
 from typing import Any, TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .. import calllog
 from ..config import settings as _settings  # noqa: F401 - loads .env
 from ..model_registry import ModelCard
+from ..contracts.moments import (
+    MediaSourceSpan,
+    MomentGroupDecision,
+    ShotObservation,
+    TranscriptDraft,
+)
 from ..roles import Role
-from ..specs.base import Spec
+from ..specs.base import ModelAnswer, Spec
 from ..specs.edit_plan import EditPlanSpec, Intent
-from ..specs.enums import CameraMotion, SemanticRole, ShotType, UserConstraint
+from ..specs.enums import (
+    Pace,
+    SemanticRole,
+    ShotType,
+    SubtitleDensity,
+    UserConstraint,
+)
 from ..specs.segment import MaterialSegment, RawSegment
 from . import prompts
 from .base import BaseProvider, NonRetryable
@@ -45,7 +58,6 @@ from .ratelimit import limiter_for
 # Accepted label vocabularies, derived from the enums so they cannot drift.
 SEMANTIC_ROLES: frozenset[str] = frozenset(SemanticRole.__args__)
 SHOT_TYPES: frozenset[str] = frozenset(ShotType.__args__)
-CAMERA_MOTIONS: frozenset[str] = frozenset(CameraMotion.__args__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -56,6 +68,7 @@ _MIME = {
     ".webp": "image/webp",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
+    ".wav": "audio/wav",
 }
 
 
@@ -113,6 +126,7 @@ class OpenAICompatibleClient:
         self.last_usage: dict[str, int | None] = {}
         self.last_repairs = 0
         self.rate_limited = 0
+        self.last_raw: str | None = None
         self._limiter = limiter_for(card.key, card.requests_per_minute)
         # Set by the owning provider so a log line says which role and which
         # segment a call belonged to.
@@ -131,6 +145,16 @@ class OpenAICompatibleClient:
                 f"model {self.card.key!r} needs {env} to be set"
             )
         return value.rstrip("/")
+
+    @property
+    def model_id(self) -> str:
+        resolved = self.card.resolved_model_id()
+        if resolved.startswith("TBD"):
+            raise ProviderConfigError(
+                f"model {self.card.key!r} has no id yet: set "
+                f"{self.card.model_id_env} to the endpoint id from the console"
+            )
+        return resolved
 
     @property
     def api_key(self) -> str:
@@ -167,7 +191,7 @@ class OpenAICompatibleClient:
         def _log(status: str, response: str | None, error: str | None) -> None:
             calllog.record(
                 role=self.role_name,
-                model=self.card.model_id,
+                model=self.card.resolved_model_id(),
                 prompt_version=self.prompt_version,
                 mode=mode,
                 subject=self.subject,
@@ -184,7 +208,11 @@ class OpenAICompatibleClient:
         except Exception as exc:
             _log("error", None, f"{type(exc).__name__}: {exc}")
             raise
-        _log("ok", self._content(body), None)
+        raw = self._content(body)
+        # Kept so the caller can persist exactly what the model said, not only
+        # what we managed to parse out of it.
+        self.last_raw = raw
+        _log("ok", raw, None)
         return body
 
     async def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -219,9 +247,18 @@ class OpenAICompatibleClient:
     @staticmethod
     def _content(body: dict[str, Any]) -> str:
         try:
-            return body["choices"][0]["message"]["content"] or ""
+            choice = body["choices"][0]
         except (KeyError, IndexError) as exc:
             raise ValueError(f"unexpected response shape: {body}") from exc
+        if choice.get("finish_reason") == "length":
+            # Half a JSON object is not a malformed answer, it is an answer we
+            # cut off. Saying so is the difference between "raise max_tokens"
+            # and a fruitless hunt through the schema.
+            raise TruncatedAnswer(
+                "the model ran out of output tokens mid-answer; raise "
+                "max_tokens for this call"
+            )
+        return choice["message"]["content"] or ""
 
     def _response_format(self, schema: type[BaseModel], mode: str) -> dict | None:
         if mode == "json_schema":
@@ -266,7 +303,7 @@ class OpenAICompatibleClient:
 
         for mode in modes:
             payload: dict[str, Any] = {
-                "model": self.card.model_id,
+                "model": self.model_id,
                 "messages": list(messages),
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -297,6 +334,19 @@ class OpenAICompatibleClient:
                 return schema.model_validate_json(_extract_json(raw))
             except (ValidationError, ValueError) as exc:
                 last_error = exc
+                calllog.record(
+                    role=self.role_name,
+                    # The resolved id, not the card's placeholder: these are
+                    # the failure rows, so they are exactly the ones where
+                    # knowing which endpoint answered matters.
+                    model=self.model_id,
+                    prompt_version=self.prompt_version,
+                    mode=mode,
+                    subject=self.subject,
+                    response=raw,
+                    status="invalid_schema",
+                    error=f"{type(exc).__name__}: {exc}"[:600],
+                )
                 repaired = await self._repair(payload, raw, exc, schema)
                 if repaired is not None:
                     self.last_repairs += 1
@@ -375,7 +425,7 @@ class OpenAICompatibleProvider(BaseProvider):
         super().__init__(**kwargs)
         self.card = card
         self.name = card.key
-        self.model = card.model_id
+        self.model = card.resolved_model_id()
         # Free tiers return 5xx under load often enough that three attempts
         # leaves a long batch with avoidable holes in it.
         self.max_retries = 5
@@ -387,8 +437,12 @@ class OpenAICompatibleProvider(BaseProvider):
         self.client.prompt_version = self.prompt_version
 
     def _finish(self) -> None:
-        """Hand token usage to the base class for the cost record."""
+        """Hand usage and provenance to the base class."""
         self.report_usage(**self.client.last_usage)
+        self.report_provenance(
+            raw_response=self.client.last_raw,
+            repairs=self.client.last_repairs,
+        )
 
     @property
     def throttled(self) -> int:
@@ -396,19 +450,49 @@ class OpenAICompatibleProvider(BaseProvider):
         return self.client.rate_limited
 
 
-class Analysis(Spec):
-    """What the material model must return for one shot."""
+class Analysis(ModelAnswer):
+    """What the material model must return for one shot.
 
-    semantic: str
-    semantic_role: str
-    shot_type: str
-    camera_motion: str
-    people: int
-    emotion: list[str]
-    interestingness: float
-    composition_score: float
+    The categorical fields are typed to the project's vocabulary rather than
+    to `str`. A plain string reaches the model as an unconstrained field, and
+    a capable model answers it well - in its own words. The first real call
+    came back with semantic_role "Attempts to capture the atmosphere of a
+    heavy downpour" and shot_type "Low-angle ground-level medium shot": both
+    accurate, both unusable, and both silently coerced to "unknown", which is
+    0.55 of the matcher's decision weight thrown away.
+
+    Constraining them here puts the vocabulary in the JSON schema, where the
+    model can see it. The Python-side coercion stays as a backstop for models
+    that ignore the schema, not as the way the vocabulary is communicated.
+
+    Note what is absent: camera_motion, timing, and every quality metric.
+    Those are measured deterministically, so asking for them would cost tokens
+    to obtain a worse answer - and, for a single-frame call, an impossible one.
+    """
+
+    # One sentence, not a paragraph. The first real call spent 874 output
+    # tokens, six times what an equivalent call cost elsewhere, almost all of
+    # it on an exhaustive description nothing downstream reads.
+    semantic: str = Field(max_length=200)
+    semantic_role: SemanticRole
+    shot_type: ShotType
+    people: int = Field(ge=0)
+    emotion: list[str] = Field(max_length=3)
+    # Bounded in the schema, not just clamped afterwards: a model answering on
+    # a 0-10 scale would otherwise have every score clipped to 1.0.
+    # TODO(review): both scores are only as good as the wording that asks
+    # for them, and that wording is still a guess - see the TODO next to
+    # `interestingness` in prompts.py. The bounds here only stop a 0-10 answer
+    # from being clipped to 1.0; they do nothing about a model that answers
+    # 0.65 for everything.
+    interestingness: float = Field(ge=0.0, le=1.0)
+    composition_score: float = Field(ge=0.0, le=1.0)
     worth_using: bool
-    reason: str
+    reason: str = Field(max_length=200)
+
+
+class MomentGroupingAnswer(ModelAnswer):
+    groups: list[MomentGroupDecision] = Field(min_length=1)
 
 
 class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
@@ -422,22 +506,43 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
     role = Role.MATERIAL
 
     async def analyze_segment(
-        self, segment: RawSegment, keyframes: list[Path]
+        self,
+        segment: RawSegment,
+        keyframes: list[Path],
+        clip: Path | None = None,
     ) -> MaterialSegment:
         async def _run() -> MaterialSegment:
             self.client.subject = segment.segment_id
             frames = [p for p in keyframes if p.exists()]
-            middle = frames[len(frames) // 2 : len(frames) // 2 + 1] or frames[:1]
+
+            # A clip when one was cut and the model takes video; otherwise the
+            # frames. A still cannot show which moment in a shot is the good
+            # one, and that is what interestingness and worth_using judge.
+            use_clip = (
+                clip is not None and clip.exists() and self.card.accepts_video
+            )
+            context = (
+                "You are shown the whole shot."
+                if use_clip
+                else "You are shown one frame from the middle of the shot."
+                if len(frames) <= 1
+                else "You are shown the first, middle and last frames of the shot."
+            )
 
             content: list[dict[str, Any]] = [
                 text_part(
                     prompts.MATERIAL_USER.format(
                         duration=segment.duration,
-                        context="",
+                        context=context,
                     )
                 )
             ]
-            content += [image_part(path) for path in middle]
+            if use_clip:
+                content.append(video_part(clip))
+            elif len(frames) > 1:
+                content += [image_part(path) for path in frames]
+            else:
+                content += [image_part(path) for path in frames[:1]]
 
             analysis = await self.client.complete_structured(
                 prompts.MATERIAL_SYSTEM, content, Analysis
@@ -446,6 +551,91 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
             return _to_segment(segment, analysis, frames)
 
         return await self._guarded(_run, seconds_processed=segment.duration)
+
+    async def group_moments(
+        self, shots: tuple[ShotObservation, ...]
+    ) -> tuple[MomentGroupDecision, ...]:
+        async def _run() -> tuple[MomentGroupDecision, ...]:
+            self.client.subject = "moment-grouping"
+            answer = await self.client.complete_structured(
+                prompts.MOMENT_GROUPING_SYSTEM,
+                [
+                    text_part(
+                        prompts.MOMENT_GROUPING_USER.format(
+                            observations=json.dumps(
+                                [shot.model_dump(mode="json") for shot in shots],
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                        )
+                    )
+                ],
+                MomentGroupingAnswer,
+                max_tokens=2048,
+            )
+            self._finish()
+            return tuple(answer.groups)
+
+        return await self._guarded(_run)
+
+
+class OpenAICompatibleASRProvider(OpenAICompatibleProvider):
+    """Qwen3-ASR-compatible local audio upload.
+
+    This synchronous endpoint returns text without timestamps, so the media
+    service supplies one bounded physical-shot audio window per call and owns
+    the source timing.
+    """
+
+    role = Role.ASR
+
+    async def transcribe(self, audio: Path) -> tuple[TranscriptDraft, ...]:
+        with wave.open(str(audio), "rb") as wav:
+            duration_seconds = wav.getnframes() / max(wav.getframerate(), 1)
+        duration_ms = max(1, round(duration_seconds * 1_000))
+
+        async def _run() -> tuple[TranscriptDraft, ...]:
+            self.client.subject = audio.name
+            payload = {
+                "model": self.client.model_id,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_audio",
+                                "input_audio": {"data": data_url(audio)},
+                            }
+                        ],
+                    }
+                ],
+                "stream": False,
+                "asr_options": {"enable_itn": True},
+            }
+            body = await self.client._post(payload)
+            text = self.client._content(body).strip()
+            message = body["choices"][0]["message"]
+            audio_info = next(
+                (
+                    annotation
+                    for annotation in message.get("annotations", ())
+                    if annotation.get("type") == "audio_info"
+                ),
+                {},
+            )
+            self._finish()
+            if not text:
+                return ()
+            return (
+                TranscriptDraft(
+                    source=MediaSourceSpan(start=0, end=duration_ms),
+                    text=text,
+                    language=audio_info.get("language"),
+                    emotion=audio_info.get("emotion"),
+                ),
+            )
+
+        return await self._guarded(_run, seconds_processed=duration_seconds)
 
 
 def _to_segment(
@@ -466,7 +656,6 @@ def _to_segment(
         semantic=analysis.semantic,
         semantic_role=_coerce(analysis.semantic_role, SEMANTIC_ROLES),
         shot_type=_coerce(analysis.shot_type, SHOT_TYPES),
-        camera_motion=_coerce(analysis.camera_motion, CAMERA_MOTIONS),
         people=max(0, analysis.people),
         emotion=[e.strip().lower() for e in analysis.emotion if e.strip()],
         interestingness=_clip01(analysis.interestingness),
@@ -488,41 +677,98 @@ def _clip01(value: float) -> float:
     return float(min(1.0, max(0.0, value)))
 
 
-class IntentAnswer(Spec):
+class IntentAnswer(ModelAnswer):
     """What the model must return for a prompt.
+
+    Every optional field defaults to None and MUST stay that way. This schema
+    is the only place in the pipeline where "the user did not say" is still
+    recoverable - one step later it is merged against the reference video, and
+    a default filled in here would beat that reference while looking exactly
+    like something the user asked for.
 
     ``user_constraints`` is typed to the canonical vocabulary so the JSON
     schema constrains the model to values the planner actually acts on. Free
     text here would be extracted, stored, and then silently ignored - the user
     would watch their instruction be accepted and disregarded.
 
-    ``style`` stays open: an unrecognised style tag still feeds emotion
+    ``style`` and ``mood`` stay open: an unrecognised tag still feeds emotion
     matching, and it is a useful signal about vocabulary worth adding.
     """
 
-    target_duration: float | None = None
-    style: list[str] = []
-    user_constraints: list[UserConstraint] = []
+    target_duration_sec: float | None = None
+    content_type: str | None = Field(default=None, max_length=40)
+
+    mood: list[str] = Field(default_factory=list, max_length=5)
+    style: list[str] = Field(default_factory=list, max_length=5)
+    negative_style: list[str] = Field(default_factory=list, max_length=5)
+
+    overall_pace: Pace | None = None
+    opening_pace: Pace | None = None
+
+    prioritize: list[str] = Field(default_factory=list, max_length=5)
+    avoid: list[str] = Field(default_factory=list, max_length=5)
+
+    subtitle_density: SubtitleDensity | None = None
+    keep_original_audio: bool | None = None
+    use_music: bool | None = None
+
+    user_constraints: list[UserConstraint] = Field(
+        default_factory=list, max_length=9
+    )
 
 
-class OpenAICompatiblePlannerProvider(OpenAICompatibleProvider):
-    """Role 3: turns a request and a pool summary into structure."""
+def _tags(values: list[str]) -> list[str]:
+    """Lowercased, trimmed, de-duplicated, order preserved."""
+    cleaned = [v.strip().lower() for v in values if v and v.strip()]
+    return list(dict.fromkeys(cleaned))
 
-    role = Role.PLANNER
+
+class TruncatedAnswer(ValueError):
+    """The response was cut off by max_tokens, not malformed by the model."""
+
+
+class OpenAICompatibleIntentProvider(OpenAICompatibleProvider):
+    """Role 3a: a sentence becomes structured constraints.
+
+    Its whole job is to lose nothing and invent nothing. It does not decide how
+    the video is cut and is never given the footage - what it produces is one
+    input to that decision, weighed against the reference video and the project
+    state by ``planner.merge``.
+    """
+
+    role = Role.INTENT
 
     async def parse_intent(self, prompt: str) -> Intent:
         async def _run() -> Intent:
             answer = await self.client.complete_structured(
                 prompts.INTENT_SYSTEM,
-                [text_part(prompt)],
+                [text_part(prompts.INTENT_USER.format(prompt=prompt))],
                 IntentAnswer,
-                max_tokens=256,
+                max_tokens=512,
             )
             self._finish()
-            intent = Intent()
-            if answer.target_duration:
-                intent.target_duration = float(answer.target_duration)
-            intent.style = [s.strip().lower() for s in answer.style if s.strip()]
+
+            intent = Intent(raw_prompt=prompt)
+            if answer.target_duration_sec:
+                intent.target_duration = float(answer.target_duration_sec)
+                # The distinction the whole precedence chain rests on: a
+                # duration the user stated outranks a reference video, the
+                # default 45s does not.
+                intent.duration_stated = True
+
+            intent.content_type = answer.content_type
+            intent.mood = _tags(answer.mood)
+            intent.style = _tags(answer.style)
+            intent.negative_style = _tags(answer.negative_style)
+
+            intent.rhythm.overall_pace = answer.overall_pace
+            intent.rhythm.opening_pace = answer.opening_pace
+            intent.content.prioritize = _tags(answer.prioritize)
+            intent.content.avoid = _tags(answer.avoid)
+            intent.text.subtitle_density = answer.subtitle_density
+            intent.audio.keep_original_audio = answer.keep_original_audio
+            intent.audio.use_music = answer.use_music
+
             # Already constrained to the canonical vocabulary by the schema;
             # deduplicated because models repeat themselves when a prompt says
             # the same thing twice.
@@ -531,31 +777,215 @@ class OpenAICompatiblePlannerProvider(OpenAICompatibleProvider):
 
         return await self._guarded(_run)
 
+
+class OpenAICompatiblePlannerProvider(OpenAICompatibleProvider):
+    """Role 3b: conditioning plus an inventory becomes a plan.
+
+    The model sees no clips, only how many seconds of each kind of shot exist.
+    That is the whole point of the two-layer split: a plan that named specific
+    clips could not be re-matched against different footage, and the model is
+    worse at picking clips than the matcher's scoring is.
+    """
+
+    role = Role.PLANNER
+
     async def generate_plans(
         self, context: dict[str, Any], n: int, seed: int
     ) -> list[EditPlanSpec]:
-        """Deliberately delegated to the deterministic planner for now.
+        """One model call, then deterministic variation for the rest.
 
-        The structure code in aive.planner already enforces the things a model
-        gets wrong - durations that sum to the target, sections that only ask
-        for footage the pool contains, candidates that differ by construction.
-        Handing planning to a model before those guarantees are testable would
-        trade a known-good structure for an unverified one.
+        Not n calls: candidates have to differ *by construction* for best-of-N
+        to measure choice rather than sampler noise, and re-rolling the same
+        prompt at a higher temperature produces plans that differ in wording
+        and agree in structure. The model decides the shape; the variants
+        perturb one editing decision each, the same way they do without a
+        model.
         """
-        from ..planner import PlanningContext, generate_plans as build
+        from ..planner import PlanningContext, generate_plans as build  # noqa: PLC0415
+        from ..planner.draft import DraftRejected, PlanDraft, to_plan  # noqa: PLC0415
+        from ..planner.merge import Conditioning  # noqa: PLC0415
+        from ..planner.perturb import derive  # noqa: PLC0415
 
-        intent = context.get("intent") or Intent(
+        intent: Intent = context.get("intent") or Intent(
             target_duration=float(context.get("target_duration", 45.0))
         )
-        planning = PlanningContext(
-            project_id=str(context.get("project_id", "proj")),
-            intent=intent,
-            pool_summary=context.get("pool_summary", {}),
+        conditioning: Conditioning = context.get("conditioning") or Conditioning(
+            target_duration=intent.target_duration
         )
-        return build(planning, n, seed)
+        pool = context.get("pool_summary") or {}
+        project_id = str(context.get("project_id", "proj"))
+
+        planning = PlanningContext(
+            project_id=project_id,
+            intent=intent,
+            pool_summary=pool,
+            conditioning=conditioning,
+        )
+
+        async def _run() -> list[EditPlanSpec]:
+            draft = await self.client.complete_structured(
+                prompts.PLANNER_SYSTEM,
+                [
+                    text_part(
+                        prompts.PLANNER_USER.format(
+                            duration=conditioning.target_duration,
+                            intent=_describe_intent(intent, conditioning),
+                            grammar=_describe_grammar(conditioning),
+                            inventory=_describe_inventory(pool),
+                        )
+                    )
+                ],
+                PlanDraft,
+                # The largest object anything in the pipeline asks for: a
+                # 12-section plan of 80 slots. Truncation here costs a full
+                # call, so the ceiling is set well above the observed peak
+                # (~2,600 output tokens) rather than close to it.
+                max_tokens=8192,
+            )
+            self._finish()
+            base = to_plan(
+                draft,
+                project_id=project_id,
+                intent=intent,
+                conditioning=conditioning,
+                pool_summary=pool,
+                candidate_index=0,
+                seed=seed,
+            )
+            return [base] + derive(base, n - 1, seed)
+
+        try:
+            return await self._guarded(_run)
+        except (DraftRejected, ValidationError) as exc:
+            # A plan the code could not repair is not shipped: the rule planner
+            # produces a worse edit but a valid one. Recorded rather than
+            # swallowed, because "the model planned this" and "the fallback
+            # planned this" must never look the same afterwards.
+            self.report_provenance(
+                planner_fallback=f"{type(exc).__name__}: {exc}"
+            )
+            plans = build(planning, n, seed)
+            for plan in plans:
+                plan.provenance.extra["source"] = "rules_fallback"
+                plan.provenance.extra["fallback_reason"] = str(exc)
+            return plans
 
 
-class Verdict(Spec):
+def _describe_intent(intent: Intent, conditioning: Conditioning) -> str:
+    """Only what the user actually expressed, in plain lines.
+
+    Fields nobody set are omitted rather than printed as null: a wall of
+    "null" teaches the model that most of the answer is nothing, and it starts
+    returning nothing.
+    """
+    lines: list[str] = []
+    if intent.raw_prompt:
+        lines.append(f'in their words: "{intent.raw_prompt}"')
+    if intent.content_type:
+        lines.append(f"kind of video: {intent.content_type}")
+    if conditioning.mood:
+        lines.append(f"mood: {', '.join(conditioning.mood)}")
+    if conditioning.style:
+        lines.append(f"style: {', '.join(conditioning.style)}")
+    if conditioning.negative_style:
+        lines.append(f"avoid this feel: {', '.join(conditioning.negative_style)}")
+    lines.append(f"pace: {conditioning.pace}")
+    if conditioning.opening_pace:
+        lines.append(f"opening pace: {conditioning.opening_pace}")
+    if conditioning.prioritize:
+        lines.append(f"show more of: {', '.join(conditioning.prioritize)}")
+    if conditioning.avoid:
+        lines.append(f"show less of: {', '.join(conditioning.avoid)}")
+    lines.append(
+        f"transitions: {'none' if conditioning.transition_density <= 0 else f'about {conditioning.transition_density:.0%} of cuts'}"
+    )
+    lines.append(f"subtitles: {conditioning.subtitle_density}")
+    lines.append(f"music: {'yes' if conditioning.use_music else 'no'}")
+    if conditioning.keep_original_sound:
+        lines.append("keep the footage's own sound")
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _describe_grammar(conditioning: Conditioning) -> str:
+    """The style prior, or an explicit statement that there is none."""
+    if not conditioning.shot_scale_distribution and not conditioning.shot_duration:
+        return (
+            "- no reference videos were given; decide the grammar yourself from "
+            "the request and the footage"
+        )
+    lines: list[str] = []
+    stats = conditioning.shot_duration
+    if stats:
+        lines.append(
+            f"shot length: median {stats.median:.2f}s, "
+            f"typical range {stats.p10:.2f}-{stats.p90:.2f}s"
+        )
+    if conditioning.shot_scale_distribution:
+        lines.append(
+            "shot scale mix: "
+            + ", ".join(
+                f"{k} {v:.0%}"
+                for k, v in sorted(
+                    conditioning.shot_scale_distribution.items(),
+                    key=lambda kv: -kv[1],
+                )
+            )
+        )
+    if conditioning.shot_scale_bigrams:
+        top = sorted(
+            conditioning.shot_scale_bigrams.items(), key=lambda kv: -kv[1]
+        )[:6]
+        lines.append(
+            "what follows what: " + ", ".join(f"{k} {v:.0%}" for k, v in top)
+        )
+    if conditioning.role_bigrams:
+        top = sorted(conditioning.role_bigrams.items(), key=lambda kv: -kv[1])[:6]
+        lines.append(
+            "subject order: " + ", ".join(f"{k} {v:.0%}" for k, v in top)
+        )
+    if conditioning.section_count:
+        lines.append(f"typical section count: {conditioning.section_count:.0f}")
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _describe_inventory(pool: dict[str, Any]) -> str:
+    """How much of each kind of shot exists, as seconds and counts.
+
+    Seconds as well as counts because "3 food shots" does not say whether that
+    is 2 seconds or 20, and a plan that asks for more than exists is the single
+    most common way a plan becomes unfillable.
+    """
+    from ..matcher.assign import MAX_USES_PER_SOURCE  # noqa: PLC0415
+
+    by_role = pool.get("by_semantic_role") or {}
+    if not by_role:
+        return "- (no footage analysed)"
+    total = pool.get("total_usable_duration")
+    lines = [
+        f"{role}: {info.get('count', 0)} shots, "
+        f"{float(info.get('total_duration', 0.0)):.1f}s total"
+        for role, info in sorted(
+            by_role.items(), key=lambda kv: -float(kv[1].get("total_duration", 0.0))
+        )
+    ]
+    distinct = sum(int(info.get("count", 0)) for info in by_role.values())
+    if total:
+        lines.append(f"all usable footage: {float(total):.1f}s")
+    if distinct:
+        # The ceiling on how many cuts this pool can produce at all. Without
+        # it the model reads "shot length: median 0.65s" and a 24-second
+        # target as a request for 36 slots, sees only that the seconds add up,
+        # and plans an edit nothing can fill. Reuse is capped downstream, so
+        # this is arithmetic, not a preference.
+        lines.append(
+            f"distinct shots: {distinct}, each usable at most "
+            f"{MAX_USES_PER_SOURCE} times -> at most "
+            f"{distinct * MAX_USES_PER_SOURCE} cuts in total"
+        )
+    return "\n".join(f"- {line}" for line in lines)
+
+
+class Verdict(ModelAnswer):
     choice: str  # "A" | "B" | "tie"
     reasons: list[str] = []
     confidence: float = 0.0

@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.0",
+  "project_id": "project_demo",
+  "revision_id": "revision_001",
+  "parent_revision_id": null,
+  "intent": {
+    "task_mode": "autonomous",
+    "target_duration_frames": 120,
+    "prompt": "Create a concise vertical travel film",
+    "explicit_requirements": [
+      "Keep the opening calm",
+      "Build energy in the second half"
+    ],
+    "style_tags": [
+      "travel",
+      "cinematic"
+    ]
+  },
+  "assets": [
+    {
+      "asset_id": "asset_001",
+      "kind": "video",
+      "roles": [
+        "source"
+      ],
+      "content_hash": null,
+      "label": "Arrival shot"
+    }
+  ],
+  "creative_plan": {
+    "summary": "Establish the place, then move into the experience.",
+    "sections": [
+      {
+        "section_id": "section_opening",
+        "output": {
+          "start_frame": 0,
+          "duration_frames": 120
+        },
+        "role": "opening_environment",
+        "goal": "Introduce the location and establish mood."
+      }
+    ]
+  },
+  "timeline": {
+    "duration_frames": 120,
+    "output": {
+      "width": 1080,
+      "height": 1920,
+      "fps": {
+        "num": 30,
+        "den": 1
+      },
+      "audio_sample_rate": 48000,
+      "color_space": "bt709"
+    },
+    "tracks": [
+      {
+        "kind": "video",
+        "track_id": "track_video_main",
+        "role": "primary",
+        "clips": [
+          {
+            "kind": "video",
+            "clip_id": "clip_001",
+            "asset_id": "asset_001",
+            "source": {
+              "start": 12000,
+              "end": 16000,
+              "timescale": 1000
+            },
+            "output": {
+              "start_frame": 0,
+              "duration_frames": 120
+            },
+            "playback": {
+              "kind": "constant",
+              "rate": {
+                "num": 1,
+                "den": 1
+              }
+            },
+            "crop": null,
+            "reframe": {
+              "mode": "center",
+              "focus_x": null,
+              "focus_y": null
+            },
+            "motion": {
+              "definition_id": "motion.subject_push_in",
+              "definition_version": "1.0.0",
+              "parameters": {
+                "strength": 0.12,
+                "easing": "ease_in_out"
+              }
+            },
+            "transition_out": null,
+            "effects": []
+          }
+        ],
+        "enabled": true
+      }
+    ]
+  },
+  "locks": [],
+  "reference_context": null,
+  "dependencies": {
+    "renderer": {
+      "name": "ffmpeg",
+      "version": "dev",
+      "content_hash": null
+    },
+    "skills": [],
+    "components": [],
+    "analysis_models": []
+  }
+}

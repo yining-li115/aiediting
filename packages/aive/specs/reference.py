@@ -22,6 +22,13 @@ from pydantic import Field
 from .base import Provenance, Spec, VersionedSpec, new_id
 from .enums import CameraMotion, SemanticRole, ShotType, Transition
 
+# TODO(review): below this, references disagree enough that the aggregate
+# describes none of them. 0.5 is a guess - it has never been checked against
+# a set of references a person would call "the same style". Validate by
+# scoring a deliberately mixed set (a fast MV plus a slow travel film) and
+# confirming it lands below, while three clips from one creator land above.
+MIN_CONSISTENCY = 0.5
+
 
 class ReferenceShot(Spec):
     """One shot in the reference, as observed."""
@@ -104,3 +111,55 @@ class ReferenceAnalysis(VersionedSpec):
 
     def durations(self) -> list[float]:
         return [shot.duration for shot in self.shots]
+
+
+class StylePrior(VersionedSpec):
+    """B1's output: the editing grammar of N references, as a distribution.
+
+    This is what makes a style transferable. Nothing here names a shot, a
+    moment or a frame of the reference - it is all statistics over how the
+    cutting behaved, which is exactly the part that can be applied to somebody
+    else's footage. A remake (B2) walks the reference's shot sequence; a style
+    prior only says "shots tend to run about this long, and a wide tends to be
+    followed by a medium".
+
+    It conditions the planner. It is not a plan, and it never becomes one on
+    its own: the planner still has to decide what to do with the user's actual
+    material, and an explicit user instruction outranks anything here.
+    """
+
+    prior_id: str = Field(default_factory=lambda: new_id("sp"))
+    project_id: str | None = None
+    source_reference_ids: list[str] = Field(default_factory=list)
+
+    shot_duration: DurationStats = Field(default_factory=DurationStats)
+    # How long the references run. Not a style property in itself, but the
+    # best available answer to "how long should this be" when the user did
+    # not say - far better than a constant.
+    total_duration: DurationStats = Field(default_factory=DurationStats)
+    pace: str = "medium"
+
+    shot_scale_distribution: dict[str, float] = Field(default_factory=dict)
+    shot_scale_bigrams: dict[str, float] = Field(default_factory=dict)
+    role_distribution: dict[str, float] = Field(default_factory=dict)
+    role_bigrams: dict[str, float] = Field(default_factory=dict)
+
+    transition_density: DurationStats = Field(default_factory=DurationStats)
+    subtitle_density: str = "unknown"
+    beat_sync_strength: DurationStats = Field(default_factory=DurationStats)
+    section_count: DurationStats = Field(default_factory=DurationStats)
+
+    style_tags: list[str] = Field(default_factory=list)
+
+    # How much the references actually agree. Five clips with nothing in common
+    # average out to a prior that describes none of them, and applying that is
+    # worse than applying no prior at all - so this is reported, and a low
+    # value is something the user is told about rather than something the
+    # planner silently acts on.
+    consistency: float = 0.0
+
+    provenance: Provenance = Field(default_factory=Provenance)
+
+    def is_usable(self) -> bool:
+        """Whether this prior says anything worth conditioning on."""
+        return bool(self.source_reference_ids) and self.consistency >= MIN_CONSISTENCY

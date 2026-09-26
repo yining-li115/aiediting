@@ -18,6 +18,7 @@ from .mock import (
     MockAgentProvider,
     MockASRProvider,
     MockEmbeddingProvider,
+    MockIntentProvider,
     MockMaterialProvider,
     MockPlannerProvider,
     MockReferenceProvider,
@@ -32,6 +33,7 @@ Factory = Callable[..., BaseProvider]
 _ADAPTERS: dict[tuple[str, Role], Factory] = {
     ("mock", Role.MATERIAL): MockMaterialProvider,
     ("mock", Role.REFERENCE): MockReferenceProvider,
+    ("mock", Role.INTENT): MockIntentProvider,
     ("mock", Role.PLANNER): MockPlannerProvider,
     ("mock", Role.EMBEDDING): MockEmbeddingProvider,
     ("mock", Role.RERANK): MockRerankProvider,
@@ -42,23 +44,53 @@ _ADAPTERS: dict[tuple[str, Role], Factory] = {
 }
 
 
+def _offline_director_factory(**kwargs: Any) -> BaseProvider:
+    from ..agent.provider import OfflineDirectorProvider  # noqa: PLC0415
+
+    return OfflineDirectorProvider(**kwargs)
+
+
+_ADAPTERS[("mock", Role.DIRECTOR)] = _offline_director_factory
+
+
+def _offline_render_reviewer_factory(**kwargs: Any) -> BaseProvider:
+    from ..agent.render_review import (  # noqa: PLC0415
+        OfflineRenderReviewerProvider,
+    )
+
+    return OfflineRenderReviewerProvider(**kwargs)
+
+
+_ADAPTERS[("mock", Role.REVIEWER)] = _offline_render_reviewer_factory
+
+
 def _openai_compatible_factory(role: Role):
     """Built lazily so importing the registry does not pull in httpx clients."""
 
     def factory(card: ModelCard | None = None, **kwargs: Any) -> BaseProvider:
         from .openai_compatible import (  # noqa: PLC0415
             OpenAICompatibleCriticProvider,
+            OpenAICompatibleASRProvider,
+            OpenAICompatibleIntentProvider,
             OpenAICompatibleMaterialProvider,
             OpenAICompatiblePlannerProvider,
+        )
+        from ..agent.provider import (  # noqa: PLC0415
+            VolcanoDirectorProvider,
+            VolcanoRenderReviewerProvider,
         )
 
         classes = {
             Role.MATERIAL: OpenAICompatibleMaterialProvider,
             Role.REFERENCE: OpenAICompatibleMaterialProvider,
+            Role.INTENT: OpenAICompatibleIntentProvider,
             Role.PLANNER: OpenAICompatiblePlannerProvider,
             Role.AGENT_FAST: OpenAICompatiblePlannerProvider,
             Role.AGENT_DEEP: OpenAICompatiblePlannerProvider,
             Role.CRITIC: OpenAICompatibleCriticProvider,
+            Role.ASR: OpenAICompatibleASRProvider,
+            Role.DIRECTOR: VolcanoDirectorProvider,
+            Role.REVIEWER: VolcanoRenderReviewerProvider,
         }
         assert card is not None, "openai_compatible needs its ModelCard"
         return classes[role](card=card, **kwargs)
@@ -69,10 +101,14 @@ def _openai_compatible_factory(role: Role):
 for _role in (
     Role.MATERIAL,
     Role.REFERENCE,
+    Role.INTENT,
     Role.PLANNER,
     Role.CRITIC,
     Role.AGENT_FAST,
     Role.AGENT_DEEP,
+    Role.DIRECTOR,
+    Role.REVIEWER,
+    Role.ASR,
 ):
     _ADAPTERS[("openai_compatible", _role)] = _openai_compatible_factory(_role)
 

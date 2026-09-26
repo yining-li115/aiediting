@@ -8,6 +8,7 @@ import { THUMBNAIL_PREVIEW_COUNT } from "@/lib/config";
 export interface UploadedFile {
   id: string;
   name: string;
+  file: File;
   /** Object URL for a local preview, or a backend media URL once uploaded. */
   thumbnail?: string;
   durationLabel?: string;
