@@ -186,6 +186,32 @@ def test_builder_creates_one_valid_gapless_patch_with_source_audio() -> None:
     assert patch.scope.kind == "global"
 
 
+def test_render_autofix_candidate_uses_fresh_stable_patch_identity() -> None:
+    document = _document()
+    moment = _moment("moment_video", "asset_video", 0, 2_000)
+    decision = FirstCutDecision(
+        moment_ids=(moment.moment_id,),
+        summary="AI first cut",
+        explanation="Use the opening.",
+    )
+    common = {
+        "document": document,
+        "moments": (moment,),
+        "decision": decision,
+        "run_id": "run_first_cut",
+        "request_id": "request_first_cut",
+        "asset_has_audio": {"asset_video": True},
+    }
+
+    initial = build_first_cut_patch(**common)
+    replacement = build_first_cut_patch(**common, candidate_attempt=1)
+
+    assert replacement.base_revision_id == initial.base_revision_id
+    assert replacement.patch_id != initial.patch_id
+    assert replacement.idempotency_key != initial.idempotency_key
+    assert replacement.operations != initial.operations
+
+
 def test_builder_rejects_provider_selection_of_unusable_moment() -> None:
     document = _document()
     moment = _moment(

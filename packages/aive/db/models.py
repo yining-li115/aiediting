@@ -407,6 +407,10 @@ class AgentRunRow(Base):
             name="uq_agent_runs_project_id_idempotency_key",
         ),
         UniqueConstraint("job_id", name="uq_agent_runs_job_id"),
+        UniqueConstraint(
+            "render_autofix_job_id",
+            name="uq_agent_runs_render_autofix_job_id",
+        ),
     )
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     project_id: Mapped[str] = mapped_column(
@@ -440,6 +444,15 @@ class AgentRunRow(Base):
     render_job_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("jobs.id")
     )
+    render_autofix_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id")
+    )
+    render_autofix_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    render_autofix_context_json: Mapped[dict | None] = mapped_column(JSON)
+    render_autofix_decision_json: Mapped[dict | None] = mapped_column(JSON)
+    render_autofix_review_json: Mapped[dict | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

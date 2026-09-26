@@ -97,7 +97,12 @@ async def lifespan(_: FastAPI):
     pending_render_reviews = tuple(
         run
         for run in director.incomplete_render_reviews()
-        if run.status in {"awaiting_review", "reviewing"}
+        if run.status in {
+            "awaiting_review",
+            "reviewing",
+            "review_rejected",
+            "autofixing",
+        }
     )
     agent_render_job_ids = {
         run.render_job_id
@@ -109,8 +114,14 @@ async def lifespan(_: FastAPI):
         for run in pending_render_reviews
         if run.render_review_job_id is not None
     }
+    agent_autofix_job_ids = {
+        run.render_autofix_job_id
+        for run in pending_render_reviews
+        if run.render_autofix_job_id is not None
+    }
     render_jobs = jobs.recoverable("revision_render")
     review_jobs = jobs.recoverable("render_review")
+    autofix_jobs = jobs.recoverable("render_autofix")
     recovered = {
         asyncio.create_task(autonomous.run_processing_then_first_cut(job_id))
         for job_id in jobs.recoverable("media_processing")
@@ -136,6 +147,13 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(jobs.run(job_id, reviewing.process))
         for job_id in review_jobs
         if job_id not in agent_review_job_ids
+    )
+    # Every AutoFix Job belongs to an incomplete Director run. The workflow
+    # task above must own it so completion continues into render and review.
+    recovered.update(
+        asyncio.create_task(jobs.run(job_id, director.process_render_autofix))
+        for job_id in autofix_jobs
+        if job_id not in agent_autofix_job_ids
     )
     try:
         yield

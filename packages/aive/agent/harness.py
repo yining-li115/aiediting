@@ -5,9 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from ..contracts.director import AgentRunContext
+from ..contracts.director import (
+    AgentRunContext,
+    FirstCutDecision,
+    RenderAutoFixContext,
+)
 from ..contracts.moments import MomentEvidence
-from ..contracts.rendering import RenderArtifact
+from ..contracts.rendering import RenderArtifact, RenderReviewReport
 from ..contracts.revision import ProjectRevision
 from ..media.repository import AssetProcessingRecord
 from .context import AgentRunContextBuilder
@@ -20,6 +24,11 @@ from .pipeline import (
 )
 from .provider import DirectorProvider
 from .render_review import RenderReviewEngine, RenderReviewOutcome
+from .render_autofix import (
+    MAX_RENDER_AUTOFIX_ATTEMPTS,
+    RenderAutoFixOutcome,
+    RenderAutoFixPipeline,
+)
 from .review import FirstCutReviewer
 
 
@@ -39,15 +48,22 @@ class VideoAgentHarness:
         reviewer: FirstCutReviewer | None = None,
         render_review_engine: RenderReviewEngine | None = None,
         max_repair_attempts: int = MAX_AUTOFIX_ATTEMPTS,
+        max_render_autofix_attempts: int = MAX_RENDER_AUTOFIX_ATTEMPTS,
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder or AgentRunContextBuilder()
+        decision_reviewer = reviewer or FirstCutReviewer()
         self._first_cut = DirectorPipeline(
             provider=provider,
-            reviewer=reviewer or FirstCutReviewer(),
+            reviewer=decision_reviewer,
             max_repair_attempts=max_repair_attempts,
         )
         self._render_review = render_review_engine or RenderReviewEngine()
+        self._render_autofix = RenderAutoFixPipeline(
+            provider=provider,
+            reviewer=decision_reviewer,
+            max_attempts=max_render_autofix_attempts,
+        )
 
     @property
     def provider_name(self) -> str:
@@ -78,6 +94,35 @@ class VideoAgentHarness:
             revision=revision,
             asset_statuses=asset_statuses,
             moments=moments,
+        )
+
+    def can_autofix_render(
+        self,
+        report: RenderReviewReport,
+        attempts: int,
+    ) -> bool:
+        return self._render_autofix.can_repair(report, attempts)
+
+    def build_render_autofix_context(
+        self,
+        *,
+        context: AgentRunContext,
+        rejected_revision_id: str,
+        rejected_artifact_id: str,
+        attempt: int,
+        decision: FirstCutDecision,
+        review: RenderReviewReport,
+    ) -> RenderAutoFixContext:
+        if not self._render_autofix.can_repair(review, attempt - 1):
+            raise ValueError("render review is not eligible for bounded AutoFix")
+        return RenderAutoFixContext(
+            project_id=context.project_id,
+            base_revision_id=context.base_revision_id,
+            rejected_revision_id=rejected_revision_id,
+            rejected_artifact_id=rejected_artifact_id,
+            attempt=attempt,
+            decision=decision,
+            render_review=review,
         )
 
     async def run_first_cut(
@@ -116,3 +161,21 @@ class VideoAgentHarness:
             review_id=review_id,
             reviewed_at=reviewed_at,
         )
+
+    async def autofix_render(
+        self,
+        *,
+        context: AgentRunContext,
+        autofix: RenderAutoFixContext,
+    ) -> RenderAutoFixOutcome:
+        """Produce and validate one replacement decision without persisting it."""
+
+        outcome = await self._render_autofix.repair(context, autofix)
+        explanation = (
+            f"{build_first_cut_explanation(context, outcome.decision)} "
+            f"Render AutoFix addressed: {autofix.render_review.summary}"
+        )[:4_000]
+        decision = outcome.decision.model_copy(
+            update={"explanation": explanation}
+        )
+        return RenderAutoFixOutcome(decision=decision, review=outcome.review)

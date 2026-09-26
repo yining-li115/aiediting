@@ -54,6 +54,10 @@ If those answers are unclear, inspect the repository before adding files.
 - Autonomous Agent candidates that require rendered-output review must remain
   non-current until a revision-bound ReviewReport is accepted. A failed or
   rejected review must not be converted into a commit by fallback behavior.
+- Reviewer-driven AutoFix must create a fresh typed Patch and immutable
+  candidate from the still-current committed base. Never mutate, relabel, or
+  temporarily commit the rejected candidate, and enforce the attempt limit in
+  code rather than in a prompt.
 
 ## Scope rules
 

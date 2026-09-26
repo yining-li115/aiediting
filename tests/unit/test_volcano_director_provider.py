@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
 from aive.agent.provider import DirectorProviderError, VolcanoDirectorProvider
-from aive.contracts.director import AgentAssetContext, AgentRunContext
+from aive.contracts.director import (
+    AgentAssetContext,
+    AgentRunContext,
+    FirstCutDecision,
+)
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.project_doc import OutputSettings, ProjectIntent, Rational
+from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 from aive.model_registry import ModelCard
 from aive.roles import Role
 
@@ -134,3 +140,74 @@ def test_volcano_provider_rejects_data_sharing_endpoint_by_default() -> None:
 
     with pytest.raises(DirectorProviderError, match="shares submitted data"):
         VolcanoDirectorProvider(card=card)
+
+
+async def test_volcano_provider_repairs_rejected_render_with_typed_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIVE_TEST_ARK_URL", "https://ark.example.invalid/api/v3")
+    monkeypatch.setenv("AIVE_TEST_ARK_KEY", "test-key")
+    answer = {
+        "moment_ids": ["moment_1"],
+        "summary": "Stronger rendered opening",
+        "explanation": "Open directly on the subject.",
+    }
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(answer)}}]},
+        )
+
+    provider = VolcanoDirectorProvider(
+        card=ModelCard(
+            key="test-doubao-director",
+            vendor="bytedance-volcengine",
+            model_id="ep-test-director",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_ARK_URL",
+            api_key_env="AIVE_TEST_ARK_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    decision = FirstCutDecision(
+        moment_ids=("moment_1",),
+        summary="Rejected opening",
+        explanation="Use the available shot.",
+    )
+    review = RenderReviewReport(
+        review_id="review_rejected",
+        project_id="project_volcano",
+        revision_id="revision_rejected",
+        artifact_id="artifact_rejected",
+        accepted=False,
+        visual_review_performed=True,
+        issues=(
+            RenderReviewIssue(
+                code="weak_opening",
+                severity="error",
+                source="model",
+                message="The subject appears too late.",
+                repairable=True,
+            ),
+        ),
+        summary="Strengthen the opening.",
+        provider="reviewer",
+        provider_version="1",
+        reviewed_at=datetime(2026, 9, 29, tzinfo=timezone.utc),
+    )
+
+    repaired = await provider.repair_rendered_first_cut(
+        _context(),
+        decision,
+        review,
+    )
+
+    assert repaired.summary == "Stronger rendered opening"
+    serialized = json.dumps(requests[0], ensure_ascii=False)
+    assert "weak_opening" in serialized
+    assert "rendered preview was rejected" in serialized

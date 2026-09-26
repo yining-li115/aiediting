@@ -18,6 +18,7 @@ upload -> proxy/thumbnail -> Shots/ASR/Moments
   -> ProjectService validation and immutable candidate Revision
   -> revision-bound preview Render Job
   -> deterministic media inspection + optional multimodal Reviewer
+  -> at most one Reviewer-driven replacement candidate when repairable
   -> atomic candidate acceptance
   -> browser playback
 ```
@@ -129,9 +130,19 @@ inspection and records `visual_review_performed=false`. Setting
 `AIVE_ROLE_REVIEWER_MODEL=doubao-vision` selects the Volcengine multimodal
 provider. Default tests never make paid model calls.
 
-The current slice is an accept/reject gate. It does not yet translate
-post-render issues into a correction Patch; that future loop must create a new
-candidate rather than mutating the rejected Revision.
+When every blocking issue is marked `repairable`, the Harness may start one
+durable `render_autofix` Job. The Director receives the original frozen
+AgentRunContext, rejected decision, exact candidate/artifact identities, and
+typed RenderReviewReport. It returns a complete replacement FirstCutDecision,
+which must pass the same deterministic decision Reviewer before application
+code can build another Patch.
+
+The replacement Patch is generated against the original committed base, with
+fresh stable Patch, clip, operation, candidate Revision, render, and review
+identities. The rejected candidate is never mutated or temporarily committed.
+The one-attempt limit is enforced in code. A second rejection, any
+non-repairable blocking issue, provider failure, or stale Project head is
+terminal for that Agent Run and preserves the previous committed Revision.
 
 ## 7. Durable and idempotent behavior
 
@@ -149,6 +160,9 @@ candidate rather than mutating the rejected Revision.
 - Render and review are separate durable Jobs. Startup recovery resumes the
   candidate render/review/accept sequence, including the narrow case where a
   report was saved just before process shutdown.
+- Render AutoFix is also a separate durable Job. Its input context and
+  replacement decision are persisted before Patch creation so process recovery
+  cannot silently use a different review or model answer.
 - A render or review failure leaves the previous committed Revision and preview
   current.
 
@@ -204,5 +218,5 @@ continuous conversational edits remain later Stage 3/4 work.
 The first-cut model/context/review path is implemented, but live Volcengine
 quality is not claimed until credentials are configured and a real golden
 footage run succeeds. Default offline review does not claim visual judgment.
-Rendered captions, a licensed music library, post-render correction Patch
-generation, and conversational Quick Edit belong to following slices.
+Rendered captions, a licensed music library, more capable effect-aware repair,
+and conversational Quick Edit belong to following slices.

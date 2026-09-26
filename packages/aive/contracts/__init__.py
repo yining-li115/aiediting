@@ -14,6 +14,7 @@ from .director import (
     FirstCutDecision,
     FirstCutTicket,
     MusicStrategy,
+    RenderAutoFixContext,
 )
 from .media import (
     AnalysisReadiness,
@@ -144,6 +145,7 @@ __all__ = [
     "ProjectIntent",
     "ProjectRevision",
     "Rational",
+    "RenderAutoFixContext",
     "ReferenceContext",
     "ReferencePolicy",
     "RenderArtifact",

@@ -19,6 +19,7 @@ from ..rendering.application import RevisionRenderApplication
 from ..specs.base import new_id
 from .first_cut import build_first_cut_patch
 from .harness import DirectorReviewRejected, VideoAgentHarness
+from .render_autofix import RenderAutoFixRejected
 from .repository import DirectorRunRepository
 
 
@@ -37,7 +38,7 @@ class DirectorProgressReporter(Protocol):
 
 
 class DirectorApplication:
-    """Reads evidence, commits one typed Patch, then queues exact-revision render."""
+    """Persist Director proposals and route every candidate through ProjectService."""
 
     def __init__(
         self,
@@ -217,6 +218,107 @@ class DirectorApplication:
             )
             raise
 
+    async def process_render_autofix(self, handle: DirectorProgressReporter) -> dict:
+        """Create one replacement candidate from a frozen rejected-render review."""
+
+        run = self._runs.get_autofix_job_run(handle.job_id)
+        if run.status != "autofixing":
+            return run.model_dump(mode="json")
+        handle.update(stage=Stage.AUTOFIXING, progress=0.1)
+        try:
+            if run.context is None or run.render_autofix_context is None:
+                raise FirstCutInputUnavailable("render AutoFix context is unavailable")
+            current = self._projects.get_current_revision(run.project_id)
+            if current.document.revision_id != run.base_revision_id:
+                raise FirstCutInputUnavailable(
+                    "project head changed before render AutoFix could be applied"
+                )
+            draft = self._runs.get_autofix_draft(handle.job_id)
+            if draft is None:
+                try:
+                    outcome = await self._harness.autofix_render(
+                        context=run.context,
+                        autofix=run.render_autofix_context,
+                    )
+                except RenderAutoFixRejected as exc:
+                    self._runs.save_render_autofix_decision(
+                        handle.job_id,
+                        exc.decision,
+                        exc.review,
+                    )
+                    raise
+                decision, review = outcome.decision, outcome.review
+                self._runs.save_render_autofix_decision(
+                    handle.job_id,
+                    decision,
+                    review,
+                )
+            else:
+                decision, review = draft
+            handle.update(progress=0.45)
+            patch = build_first_cut_patch(
+                document=current.document,
+                moments=run.context.moments,
+                decision=decision,
+                run_id=run.run_id,
+                request_id=_stable_id(
+                    "render-autofix-request",
+                    run.run_id,
+                    str(run.render_autofix_context.attempt),
+                ),
+                asset_has_audio={
+                    asset.asset_id: asset.has_audio for asset in run.context.assets
+                },
+                candidate_attempt=run.render_autofix_context.attempt,
+            )
+            write = self._projects.apply_patch(patch, require_review=True)
+            if write.revision is None:
+                raise FirstCutInputUnavailable(
+                    "render AutoFix Patch produced no candidate revision"
+                )
+            result_revision_id = write.revision.document.revision_id
+            handle.update(progress=0.7)
+            render = self._rendering.enqueue(
+                CreateRenderRequest(
+                    request_id=_stable_id(
+                        "render-autofix-render-request",
+                        run.run_id,
+                        str(run.render_autofix_context.attempt),
+                    ),
+                    project_id=run.project_id,
+                    revision_id=result_revision_id,
+                    idempotency_key=_stable_id(
+                        "render-autofix-render",
+                        run.run_id,
+                        str(run.render_autofix_context.attempt),
+                    ),
+                    kind="preview",
+                    quality="proxy",
+                )
+            )
+            replacement = self._runs.mark_render_autofix_candidate(
+                handle.job_id,
+                patch=patch,
+                revision_id=result_revision_id,
+                render_artifact_id=render.artifact.artifact_id,
+                render_job_id=render.artifact.job_id,
+            )
+            handle.update(progress=1.0)
+            handle.emit(
+                "render_autofix_candidate_ready",
+                run_id=replacement.run_id,
+                attempt=replacement.render_autofix_attempts,
+                revision_id=result_revision_id,
+                render_job_id=render.artifact.job_id,
+            )
+            return replacement.model_dump(mode="json")
+        except Exception as exc:
+            self._runs.mark_render_autofix_failed(
+                handle.job_id,
+                str(exc) or exc.__class__.__name__,
+            )
+            raise
+
     def get(self, project_id: str, run_id: str) -> DirectorRun | None:
         return self._runs.get(project_id, run_id)
 
@@ -236,13 +338,41 @@ class DirectorApplication:
         artifact: RenderArtifact,
     ) -> DirectorRun:
         run = self._runs.get_job_run(director_job_id)
-        if run.status in {"ready", "review_rejected"}:
+        if run.status in {"ready", "autofixing"}:
             return run
         if run.render_artifact_id != artifact.artifact_id:
             raise FirstCutInputUnavailable(
                 "render review artifact does not belong to the Director run"
             )
         if artifact.review_status == "rejected":
+            if (
+                artifact.review is not None
+                and run.context is not None
+                and run.decision is not None
+                and run.result_revision_id is not None
+                and self._harness.can_autofix_render(
+                    artifact.review,
+                    run.render_autofix_attempts,
+                )
+            ):
+                attempt = run.render_autofix_attempts + 1
+                autofix_context = self._harness.build_render_autofix_context(
+                    context=run.context,
+                    rejected_revision_id=run.result_revision_id,
+                    rejected_artifact_id=artifact.artifact_id,
+                    attempt=attempt,
+                    decision=run.decision,
+                    review=artifact.review,
+                )
+                return self._runs.enqueue_render_autofix(
+                    director_job_id,
+                    autofix_job_id=_stable_id(
+                        "job-render-autofix",
+                        run.run_id,
+                        str(attempt),
+                    ),
+                    context=autofix_context,
+                )
             return self._runs.mark_review_rejected(director_job_id)
         if artifact.review_status != "accepted" or artifact.review is None:
             raise FirstCutInputUnavailable(

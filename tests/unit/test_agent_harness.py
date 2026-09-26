@@ -16,6 +16,7 @@ from aive.contracts.project_doc import (
     Timeline,
 )
 from aive.contracts.revision import ProjectRevision, RevisionProvenance
+from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 from aive.media.repository import AssetProcessingRecord
 from aive.project.hashing import canonical_model_hash
 
@@ -44,6 +45,14 @@ class RepairingProvider:
             moment_ids=("moment_harness",),
             summary="Reviewed proposal",
             explanation="Use the available opening.",
+        )
+
+    async def repair_rendered_first_cut(self, context, decision, review):
+        self.repairs += 1
+        return FirstCutDecision(
+            moment_ids=("moment_harness",),
+            summary="Render-reviewed proposal",
+            explanation="Strengthen the opening.",
         )
 
 
@@ -127,3 +136,85 @@ async def test_harness_owns_context_review_and_bounded_recovery() -> None:
     assert "Selected 1 analyzed Moment" in outcome.decision.explanation
     assert outcome.repair_attempts == 1
     assert provider.repairs == 1
+
+
+async def test_harness_builds_and_executes_bounded_render_autofix() -> None:
+    provider = RepairingProvider()
+    harness = VideoAgentHarness(provider=provider)
+    context = harness.build_context(
+        revision=_revision(),
+        asset_statuses=(
+            AssetProcessingRecord(
+                asset_id="asset_harness",
+                project_id="project_harness",
+                storage_key="project_harness/original/asset_harness.mp4",
+                kind="video",
+                original_name="opening.mp4",
+                duration_seconds=2,
+                width=1080,
+                height=1920,
+                fps=30,
+                has_audio=True,
+                readiness="ready",
+                analysis_readiness="ready",
+            ),
+        ),
+        moments=(
+            MomentEvidence(
+                moment_id="moment_harness",
+                project_id="project_harness",
+                asset_id="asset_harness",
+                ordinal=0,
+                shot_ids=("shot_harness",),
+                source=MediaSourceSpan(start=0, end=2_000),
+                analysis_window_count=1,
+                keyframe_count=1,
+                technical_quality=0.9,
+                is_usable=True,
+                semantic_status="ready",
+                semantic="Opening shot",
+            ),
+        ),
+    )
+    decision = FirstCutDecision(
+        moment_ids=("moment_harness",),
+        summary="First candidate",
+        explanation="Use the opening.",
+    )
+    report = RenderReviewReport(
+        review_id="review_harness",
+        project_id=context.project_id,
+        revision_id="revision_rejected",
+        artifact_id="artifact_rejected",
+        accepted=False,
+        visual_review_performed=True,
+        issues=(
+            RenderReviewIssue(
+                code="weak_opening",
+                severity="error",
+                source="model",
+                message="The opening needs a stronger hook.",
+                repairable=True,
+            ),
+        ),
+        summary="Strengthen the opening.",
+        provider="reviewer",
+        provider_version="1",
+        reviewed_at=NOW,
+    )
+    autofix = harness.build_render_autofix_context(
+        context=context,
+        rejected_revision_id=report.revision_id,
+        rejected_artifact_id=report.artifact_id,
+        attempt=1,
+        decision=decision,
+        review=report,
+    )
+
+    outcome = await harness.autofix_render(context=context, autofix=autofix)
+
+    assert outcome.review.accepted is True
+    assert outcome.decision.moment_ids == ("moment_harness",)
+    assert "Selected 1 analyzed Moment" in outcome.decision.explanation
+    assert provider.repairs == 1
+    assert harness.can_autofix_render(report, attempts=1) is False

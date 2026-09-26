@@ -37,6 +37,7 @@ class Stage(str, Enum):
     RENDERING_PROXY = "rendering_proxy"
     RENDERING_HQ = "rendering_hq"
     REVIEWING = "reviewing"
+    AUTOFIXING = "autofixing"
     DONE = "done"
     FAILED = "failed"
 

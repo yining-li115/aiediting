@@ -47,6 +47,13 @@ not merely a thumbnail of an already committed edit:
    report on that Artifact.
 4. Only an accepted report may trigger atomic candidate acceptance.
 
+If all blocking issues are explicitly repairable and the bounded attempt has
+not been used, rejection may trigger one `render_autofix` Job. That Job creates
+a new candidate from the original committed base through the normal typed
+Patch path. It never edits the rejected Revision or Artifact. The replacement
+is rendered and reviewed through steps 2-4 again; a second rejection is
+terminal.
+
 `RenderReviewReport` binds `project_id`, `revision_id`, and `artifact_id` and
 records provider/version, inspection-derived and model-derived issues, whether
 a visual review actually occurred, and the final accepted decision. A

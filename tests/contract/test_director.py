@@ -16,9 +16,11 @@ from aive.contracts.director import (
     DirectorRun,
     FirstCutDecision,
     MusicStrategy,
+    RenderAutoFixContext,
 )
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.project_doc import OutputSettings, ProjectIntent, Rational
+from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 
 
 NOW = datetime(2026, 9, 26, 23, 30, tzinfo=timezone.utc)
@@ -153,4 +155,61 @@ def test_committed_run_requires_patch_revision_and_render_identity() -> None:
             provider_version="1",
             created_at=NOW,
             updated_at=NOW,
+        )
+
+
+def test_render_autofix_context_requires_repairable_rejected_review() -> None:
+    decision = FirstCutDecision(
+        moment_ids=("moment_1",),
+        summary="First cut",
+        explanation="Use the opening.",
+    )
+    review = RenderReviewReport(
+        review_id="review_rejected",
+        project_id="project_demo",
+        revision_id="revision_candidate",
+        artifact_id="artifact_candidate",
+        accepted=False,
+        visual_review_performed=True,
+        issues=(
+            RenderReviewIssue(
+                code="weak_opening",
+                severity="error",
+                source="model",
+                message="The opening does not establish the subject.",
+                repairable=True,
+            ),
+        ),
+        summary="Replace the opening.",
+        provider="reviewer",
+        provider_version="1",
+        reviewed_at=NOW,
+    )
+
+    context = RenderAutoFixContext(
+        project_id="project_demo",
+        base_revision_id="revision_assets",
+        rejected_revision_id="revision_candidate",
+        rejected_artifact_id="artifact_candidate",
+        attempt=1,
+        decision=decision,
+        render_review=review,
+    )
+
+    assert context.attempt == 1
+    with pytest.raises(ValidationError, match="only repairable"):
+        RenderAutoFixContext(
+            project_id="project_demo",
+            base_revision_id="revision_assets",
+            rejected_revision_id="revision_candidate",
+            rejected_artifact_id="artifact_candidate",
+            attempt=1,
+            decision=decision,
+            render_review=review.model_copy(
+                update={
+                    "issues": (
+                        review.issues[0].model_copy(update={"repairable": False}),
+                    )
+                }
+            ),
         )

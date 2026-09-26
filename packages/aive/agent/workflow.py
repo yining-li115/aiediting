@@ -51,8 +51,20 @@ class FirstCutWorkflow:
     async def resume_review(self, director_job_id: str) -> None:
         """Continue an interrupted candidate render/review/accept sequence."""
 
-        run = self._director.get_job_run(director_job_id)
-        if run.render_job_id is not None:
+        while True:
+            run = self._director.get_job_run(director_job_id)
+            if run.status == "autofixing":
+                if run.render_autofix_job_id is None:
+                    return
+                await self._jobs.run(
+                    run.render_autofix_job_id,
+                    self._director.process_render_autofix,
+                )
+                run = self._director.get_job_run(director_job_id)
+                if run.status not in {"awaiting_review", "reviewing"}:
+                    return
+            if run.render_job_id is None:
+                return
             await self._jobs.run(run.render_job_id, self._rendering.process)
             run = self._director.get_job_run(director_job_id)
             if run.render_artifact_id is None:
@@ -67,7 +79,13 @@ class FirstCutWorkflow:
             await self._jobs.run(review_job_id, self._reviewing.process)
             reviewed = self._reviewing.get(run.project_id, artifact.artifact_id)
             if reviewed.review_status in {"accepted", "rejected"}:
-                self._director.complete_render_review(director_job_id, reviewed)
+                result = self._director.complete_render_review(
+                    director_job_id,
+                    reviewed,
+                )
+                if result.status == "autofixing":
+                    continue
+            return
 
 
 class AutonomousProjectWorkflow:

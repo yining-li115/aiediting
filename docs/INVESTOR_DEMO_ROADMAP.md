@@ -102,11 +102,13 @@ invokes an offline or Volcengine Director, and owns deterministic review plus
 at most one bounded AutoFix. The application layer then creates a typed
 first-cut Patch through ProjectService, stores one immutable candidate Agent
 Revision, automatically renders it, runs deterministic plus optional
-Volcengine post-render review, and atomically accepts it only after approval.
+Volcengine post-render review, performs at most one Reviewer-driven replacement
+AutoFix for repairable blocking issues, and atomically accepts only an approved
+candidate.
 The browser exposes progress, explanation, and the Reviewer summary. Failed
-providers, exhausted repairs, render failures, and review rejection preserve
+providers, exhausted repairs, render failures, and final review rejection preserve
 the previous revision. A live Volcengine golden-run, rendered captions/music,
-Reviewer-driven correction Patches, and iterative chat edits remain.
+effect-aware repair beyond the first-cut subset, and iterative chat edits remain.
 
 Deliver:
 

@@ -11,6 +11,7 @@ from ..contracts.director import (
     DirectorRun,
     FirstCutDecision,
     FirstCutTicket,
+    RenderAutoFixContext,
 )
 from ..contracts.patch import Patch
 
@@ -62,6 +63,12 @@ class DirectorRunRepository(Protocol):
 
     def incomplete_render_reviews(self) -> tuple[DirectorRun, ...]: ...
 
+    def get_autofix_job_run(self, job_id: str) -> DirectorRun: ...
+
+    def get_autofix_draft(
+        self, job_id: str
+    ) -> tuple[FirstCutDecision, DirectorReview] | None: ...
+
     def mark_running(self, job_id: str) -> DirectorRun: ...
 
     def save_context(
@@ -89,5 +96,34 @@ class DirectorRunRepository(Protocol):
     def mark_review_accepted(self, job_id: str) -> DirectorRun: ...
 
     def mark_review_rejected(self, job_id: str) -> DirectorRun: ...
+
+    def enqueue_render_autofix(
+        self,
+        job_id: str,
+        *,
+        autofix_job_id: str,
+        context: RenderAutoFixContext,
+    ) -> DirectorRun: ...
+
+    def save_render_autofix_decision(
+        self,
+        autofix_job_id: str,
+        decision: FirstCutDecision,
+        review: DirectorReview,
+    ) -> DirectorRun: ...
+
+    def mark_render_autofix_candidate(
+        self,
+        autofix_job_id: str,
+        *,
+        patch: Patch,
+        revision_id: str,
+        render_artifact_id: str,
+        render_job_id: str,
+    ) -> DirectorRun: ...
+
+    def mark_render_autofix_failed(
+        self, autofix_job_id: str, error: str
+    ) -> DirectorRun: ...
 
     def mark_failed(self, job_id: str, error: str) -> DirectorRun: ...

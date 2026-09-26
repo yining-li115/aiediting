@@ -139,7 +139,8 @@ export function ProjectHistoryWorkspace({
     firstCut?.status === "running" ||
     firstCut?.status === "committed" ||
     firstCut?.status === "awaiting_review" ||
-    firstCut?.status === "reviewing";
+    firstCut?.status === "reviewing" ||
+    firstCut?.status === "autofixing";
   const waitingForFirstCut =
     assetStatuses.length > 0 &&
     !currentHasPrimaryVisual &&
@@ -453,6 +454,8 @@ export function ProjectHistoryWorkspace({
             <p className="font-medium">
               {hasActiveMedia
                 ? "Understanding your media"
+                : firstCut?.status === "autofixing"
+                  ? "Improving your AI first cut"
                 : firstCut?.status === "reviewing"
                   ? "Reviewing your AI first cut"
                   : firstCut?.status === "committed" ||
@@ -461,7 +464,9 @@ export function ProjectHistoryWorkspace({
                   : "Directing your AI first cut"}
             </p>
             <p className="mt-0.5 text-xs text-ink-soft">
-              The Director builds a candidate revision, then renders and reviews it before making it current.
+              {firstCut?.status === "autofixing"
+                ? "The Reviewer found a repairable issue. The Director is creating a new candidate without changing your current version."
+                : "The Director builds a candidate revision, then renders and reviews it before making it current."}
             </p>
           </div>
         </div>
@@ -500,6 +505,11 @@ export function ProjectHistoryWorkspace({
             {firstCut.render_review && (
               <p className="mt-1 text-xs text-emerald-800/80">
                 Reviewer: {firstCut.render_review.summary}
+              </p>
+            )}
+            {(firstCut.render_autofix_attempts ?? 0) > 0 && (
+              <p className="mt-1 text-xs text-emerald-800/80">
+                Passed after {firstCut.render_autofix_attempts ?? 0} bounded AutoFix attempt.
               </p>
             )}
           </div>

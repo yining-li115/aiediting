@@ -23,6 +23,11 @@ from .render_review import (
     RenderReviewOutcome,
     RenderReviewerProvider,
 )
+from .render_autofix import (
+    MAX_RENDER_AUTOFIX_ATTEMPTS,
+    RenderAutoFixOutcome,
+    RenderAutoFixRejected,
+)
 from .render_review_application import RenderReviewApplication
 from .review import FirstCutReviewer
 from .tools import DirectorMomentTools, MomentSearchHit, MomentSearchQuery
@@ -51,6 +56,9 @@ __all__ = [
     "RenderReviewEngine",
     "RenderReviewOutcome",
     "RenderReviewApplication",
+    "RenderAutoFixOutcome",
+    "RenderAutoFixRejected",
+    "MAX_RENDER_AUTOFIX_ATTEMPTS",
     "RenderReviewerProvider",
     "RenderReviewerProviderError",
     "VolcanoDirectorProvider",

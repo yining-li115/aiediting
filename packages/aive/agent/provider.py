@@ -16,7 +16,11 @@ from ..contracts.director import (
     FirstCutDecision,
     MusicStrategy,
 )
-from ..contracts.rendering import RenderCreativeReview, RenderReviewContext
+from ..contracts.rendering import (
+    RenderCreativeReview,
+    RenderReviewContext,
+    RenderReviewReport,
+)
 from ..model_registry import ModelCard
 from ..providers.base import BaseProvider
 from ..providers.openai_compatible import (
@@ -54,6 +58,13 @@ class DirectorProvider(Protocol):
         context: AgentRunContext,
         decision: FirstCutDecision,
         review: DirectorReview,
+    ) -> FirstCutDecision: ...
+
+    async def repair_rendered_first_cut(
+        self,
+        context: AgentRunContext,
+        decision: FirstCutDecision,
+        review: RenderReviewReport,
     ) -> FirstCutDecision: ...
 
 
@@ -139,6 +150,50 @@ class OfflineDirectorProvider(BaseProvider):
     ) -> FirstCutDecision:
         return await self.create_first_cut(context)
 
+    async def repair_rendered_first_cut(
+        self,
+        context: AgentRunContext,
+        decision: FirstCutDecision,
+        review: RenderReviewReport,
+    ) -> FirstCutDecision:
+        """Choose a deterministic alternative without claiming visual judgment."""
+
+        async def _run() -> FirstCutDecision:
+            selected_ids = set(decision.moment_ids)
+            usable = tuple(
+                moment
+                for moment in context.moments
+                if moment.is_usable and moment.moment_id in selected_ids
+            )
+            ranked = tuple(
+                sorted(
+                    usable,
+                    key=lambda moment: (
+                        0 if moment.semantic_role in {"hook", "opening"} else 1,
+                        -moment.technical_quality,
+                        moment.ordinal,
+                        moment.moment_id,
+                    ),
+                )
+            )
+            moment_ids = tuple(moment.moment_id for moment in ranked)
+            if moment_ids == decision.moment_ids and len(moment_ids) > 1:
+                moment_ids = (*moment_ids[1:], moment_ids[0])
+            if not moment_ids:
+                moment_ids = decision.moment_ids
+            return decision.model_copy(
+                update={
+                    "moment_ids": moment_ids,
+                    "summary": f"{decision.summary} — render AutoFix"[:1_000],
+                    "explanation": (
+                        "Reordered the authorized selected Moments in response to the "
+                        f"render review: {review.summary}"
+                    )[:4_000],
+                }
+            )
+
+        return await self._guarded(_run, project_id=context.project_id)
+
 
 class VolcanoDirectorProvider(OpenAICompatibleProvider):
     """Structured Director calls through Volcengine Ark's compatible API."""
@@ -193,6 +248,25 @@ class VolcanoDirectorProvider(OpenAICompatibleProvider):
                 "brief. Return a complete replacement FirstCutDecision, not a diff.\n\n"
                 f"Rejected decision:\n{decision.model_dump_json(indent=2)}\n\n"
                 f"Reviewer result:\n{review.model_dump_json(indent=2)}"
+            ),
+        )
+
+    async def repair_rendered_first_cut(
+        self,
+        context: AgentRunContext,
+        decision: FirstCutDecision,
+        review: RenderReviewReport,
+    ) -> FirstCutDecision:
+        return await self._complete(
+            context,
+            instruction=(
+                "Repair a first cut whose rendered preview was rejected. Resolve every "
+                "repairable error in the render review using only authorized Moment IDs "
+                "from the frozen context. Return a complete replacement FirstCutDecision, "
+                "not a diff, Patch, timeline, renderer command, or explanation outside the "
+                "schema.\n\n"
+                f"Rejected decision:\n{decision.model_dump_json(indent=2)}\n\n"
+                f"Rendered-preview review:\n{review.model_dump_json(indent=2)}"
             ),
         )
 

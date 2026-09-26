@@ -21,6 +21,7 @@ DirectorRunStatus = Literal[
     "committed",
     "awaiting_review",
     "reviewing",
+    "autofixing",
     "ready",
     "render_failed",
     "review_rejected",
@@ -164,6 +165,38 @@ class DirectorReview(ContractModel):
         return self
 
 
+class RenderAutoFixContext(ContractModel):
+    """Frozen input for one bounded repair of a rejected rendered candidate."""
+
+    autofix_version: Literal["1.0"] = "1.0"
+    project_id: DatabaseId
+    base_revision_id: StableId
+    rejected_revision_id: StableId
+    rejected_artifact_id: StableId
+    attempt: int = Field(ge=1, le=3)
+    decision: FirstCutDecision
+    render_review: RenderReviewReport
+
+    @model_validator(mode="after")
+    def review_targets_rejected_candidate(self) -> RenderAutoFixContext:
+        if self.render_review.project_id != self.project_id:
+            raise ValueError("render AutoFix review belongs to another project")
+        if self.render_review.revision_id != self.rejected_revision_id:
+            raise ValueError("render AutoFix review targets another revision")
+        if self.render_review.artifact_id != self.rejected_artifact_id:
+            raise ValueError("render AutoFix review targets another artifact")
+        if self.render_review.accepted:
+            raise ValueError("render AutoFix requires a rejected review")
+        errors = tuple(
+            issue
+            for issue in self.render_review.issues
+            if issue.severity == "error"
+        )
+        if not errors or not all(issue.repairable for issue in errors):
+            raise ValueError("render AutoFix requires only repairable blocking issues")
+        return self
+
+
 class DirectorRun(ContractModel):
     """Durable audit and recovery record for one first-cut Agent run."""
 
@@ -187,6 +220,9 @@ class DirectorRun(ContractModel):
     render_review_status: RenderReviewStatus = "not_requested"
     render_review_job_id: StableId | None = None
     render_review: RenderReviewReport | None = None
+    render_autofix_attempts: int = Field(default=0, ge=0, le=3)
+    render_autofix_job_id: StableId | None = None
+    render_autofix_context: RenderAutoFixContext | None = None
     error: str | None = Field(default=None, max_length=2_000)
     created_at: datetime
     updated_at: datetime
@@ -199,6 +235,7 @@ class DirectorRun(ContractModel):
             "committed",
             "awaiting_review",
             "reviewing",
+            "autofixing",
             "ready",
             "render_failed",
             "review_rejected",
@@ -220,6 +257,20 @@ class DirectorRun(ContractModel):
                 raise ValueError("rejected Director run requires a rejected render review")
         if self.status == "review_failed" and not self.error:
             raise ValueError("review_failed Director run requires an error")
+        if self.render_autofix_attempts:
+            if self.render_autofix_job_id is None or self.render_autofix_context is None:
+                raise ValueError("render AutoFix attempt requires Job and context")
+            if self.render_autofix_context.attempt != self.render_autofix_attempts:
+                raise ValueError("render AutoFix attempt count disagrees with context")
+            if self.render_autofix_context.project_id != self.project_id:
+                raise ValueError("render AutoFix context belongs to another project")
+            if self.render_autofix_context.base_revision_id != self.base_revision_id:
+                raise ValueError("render AutoFix context has another base revision")
+        elif self.render_autofix_job_id is not None or self.render_autofix_context is not None:
+            raise ValueError("render AutoFix state requires a positive attempt count")
+        if self.status == "autofixing":
+            if self.render_review is None or self.render_review.accepted:
+                raise ValueError("render AutoFix requires a rejected render review")
         if self.status == "failed" and not self.error:
             raise ValueError("failed Director run requires an error")
         return self

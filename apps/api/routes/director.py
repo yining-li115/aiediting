@@ -95,6 +95,13 @@ def create_first_cut(
     ticket = workflow.enqueue(request)
     if ticket.run.status in {"queued", "running"}:
         background.add_task(workflow.run, ticket.run.job_id)
+    elif ticket.run.status in {
+        "awaiting_review",
+        "reviewing",
+        "review_rejected",
+        "autofixing",
+    }:
+        background.add_task(workflow.resume_review, ticket.run.job_id)
     return ticket
 
 

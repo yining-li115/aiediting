@@ -68,6 +68,7 @@ def build_first_cut_patch(
     run_id: str,
     request_id: str,
     asset_has_audio: Mapping[str, bool],
+    candidate_attempt: int = 0,
 ) -> Patch:
     """Build one executable, gapless first-cut Patch from selected Moments."""
 
@@ -76,6 +77,13 @@ def build_first_cut_patch(
     if document.timeline.tracks:
         raise FirstCutBuildError("first cut requires an empty base timeline")
 
+    if candidate_attempt < 0 or candidate_attempt > 3:
+        raise FirstCutBuildError("candidate attempt must be between 0 and 3")
+    identity_seed = (
+        run_id
+        if candidate_attempt == 0
+        else f"{run_id}:render-autofix:{candidate_attempt}"
+    )
     by_moment = {moment.moment_id: moment for moment in moments}
     by_asset = {asset.asset_id: asset for asset in document.assets}
     target_frames = document.intent.target_duration_frames
@@ -113,7 +121,7 @@ def build_first_cut_patch(
                 continue
             source = _frame_exact_source(moment, duration, fps.num, fps.den)
             output = FrameRange(start_frame=cursor, duration_frames=duration)
-            clip_id = _stable_id("clip", run_id, moment_id, str(ordinal))
+            clip_id = _stable_id("clip", identity_seed, moment_id, str(ordinal))
             visual_clips.append(
                 VideoClip(
                     clip_id=clip_id,
@@ -125,7 +133,9 @@ def build_first_cut_patch(
             if asset_has_audio.get(asset.asset_id, False):
                 audio_clips.append(
                     AudioClip(
-                        clip_id=_stable_id("audio", run_id, moment_id, str(ordinal)),
+                        clip_id=_stable_id(
+                            "audio", identity_seed, moment_id, str(ordinal)
+                        ),
                         asset_id=asset.asset_id,
                         source=source,
                         output=output,
@@ -135,7 +145,7 @@ def build_first_cut_patch(
             nominal = max(1, PHOTO_HOLD_SECONDS * fps.num // fps.den)
             duration = min(nominal, remaining)
             output = FrameRange(start_frame=cursor, duration_frames=duration)
-            clip_id = _stable_id("clip", run_id, moment_id, str(ordinal))
+            clip_id = _stable_id("clip", identity_seed, moment_id, str(ordinal))
             visual_clips.append(
                 ImageClip(
                     clip_id=clip_id,
@@ -150,7 +160,9 @@ def build_first_cut_patch(
 
         sections.append(
             PlanSection(
-                section_id=_stable_id("section", run_id, moment_id, str(ordinal)),
+                section_id=_stable_id(
+                    "section", identity_seed, moment_id, str(ordinal)
+                ),
                 output=output,
                 role=moment.semantic_role or "source_moment",
                 goal=(moment.semantic or moment.asr_text or "Use selected Moment")[:1_000],
@@ -161,10 +173,10 @@ def build_first_cut_patch(
     if not visual_clips or cursor <= 0:
         raise FirstCutBuildError("Director decision produced no renderable visual clips")
 
-    video_track_id = _stable_id("track", run_id, "primary")
+    video_track_id = _stable_id("track", identity_seed, "primary")
     operations = [
         AddTrack(
-            operation_id=_stable_id("op", run_id, "add-primary"),
+            operation_id=_stable_id("op", identity_seed, "add-primary"),
             track=VideoTrack(
                 track_id=video_track_id,
                 role="primary",
@@ -175,9 +187,11 @@ def build_first_cut_patch(
     if audio_clips:
         operations.append(
             AddTrack(
-                operation_id=_stable_id("op", run_id, "add-source-audio"),
+                operation_id=_stable_id(
+                    "op", identity_seed, "add-source-audio"
+                ),
                 track=AudioTrack(
-                    track_id=_stable_id("track", run_id, "source-audio"),
+                    track_id=_stable_id("track", identity_seed, "source-audio"),
                     role="source",
                     clips=tuple(audio_clips),
                 ),
@@ -186,23 +200,23 @@ def build_first_cut_patch(
     operations.extend(
         (
             SetCreativePlan(
-                operation_id=_stable_id("op", run_id, "creative-plan"),
+                operation_id=_stable_id("op", identity_seed, "creative-plan"),
                 creative_plan=CreativePlan(
                     summary=_creative_plan_summary(decision),
                     sections=tuple(sections),
                 ),
             ),
             SetTimelineDuration(
-                operation_id=_stable_id("op", run_id, "duration"),
+                operation_id=_stable_id("op", identity_seed, "duration"),
                 duration_frames=cursor,
             ),
         )
     )
     return Patch(
-        patch_id=_stable_id("patch", run_id),
+        patch_id=_stable_id("patch", identity_seed),
         project_id=document.project_id,
         base_revision_id=document.revision_id,
-        idempotency_key=_stable_id("director-commit", run_id),
+        idempotency_key=_stable_id("director-commit", identity_seed),
         origin="agent",
         request_id=request_id,
         summary=decision.summary,

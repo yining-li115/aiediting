@@ -114,7 +114,10 @@ must still avoid assuming that exactly one chat owns a Project.
 7. Retain the autonomous first cut as an `awaiting_review` candidate.
 8. Render a preview Artifact naming that candidate revision.
 9. Inspect and optionally visually review the Artifact.
-10. Atomically accept the candidate only when review passes.
+10. For repairable rejection, run one bounded AutoFix and create a new
+    candidate from the same committed base.
+11. Render and review the replacement, then atomically accept only when review
+    passes.
 
 Analysis results are evidence used to create edits. They do not become an
 alternative timeline or silently rewrite a revision.
@@ -188,6 +191,11 @@ multimodal provider. Rejection preserves the previous head. The offline
 Reviewer records that no visual judgment occurred instead of pretending model
 review happened.
 
+Reviewer-driven AutoFix is bounded to one replacement attempt. It consumes a
+frozen rejected-review context, creates a fresh typed Patch/candidate, and
+re-enters the same render/review gate. It cannot mutate or commit the rejected
+candidate. Non-repairable errors bypass the model and terminate safely.
+
 If the Project head changes during review, acceptance conflicts and must be
 rebased or regenerated. It never overwrites the newer work.
 
@@ -235,8 +243,7 @@ autonomous first-cut vertical slice are now implemented):
    search/inspection, composite offline/Volcengine Director, structured
    creative/copy/caption/music decision, deterministic review, one bounded
    AutoFix, first-cut Patch -> candidate Revision -> automatic preview ->
-   post-render Reviewer -> atomic acceptance implemented; live model
-   qualification, Reviewer-driven correction Patches, and iterative chat edits
-   remain**).
+   post-render Reviewer -> bounded replacement AutoFix -> atomic acceptance
+   implemented; live model qualification and iterative chat edits remain**).
 
 Each later layer depends on the earlier state boundary and must not replace it.
