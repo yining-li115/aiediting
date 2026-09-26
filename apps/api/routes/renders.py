@@ -11,9 +11,10 @@ from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
 from aive.db.session import get_session_factory
 from aive.jobs import JobRunner
-from aive.rendering import ProjectDocFFmpegRenderer, RevisionRenderApplication
+from aive.rendering import RevisionRenderApplication
 from aive.storage import get_storage
 
+from ..component_dependencies import get_project_renderer
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["project renders"])
 
@@ -25,7 +26,7 @@ def get_revision_render_application() -> RevisionRenderApplication:
         assets=SqlAlchemyMediaAssetRepository(sessions),
         artifacts=SqlAlchemyRenderRepository(sessions),
         storage=get_storage(),
-        renderer=ProjectDocFFmpegRenderer(),
+        renderer=get_project_renderer(),
     )
 
 

@@ -75,7 +75,10 @@ A revision cannot be its own parent.
 - target duration in output frames;
 - original/current prompt;
 - explicit user requirements;
-- style tags used as creative context.
+- style tags used as creative context;
+- typed `caption_policy` and `music_policy` values: `director`, `none`, or
+  `auto`. Browser toggles persist these policies instead of relying on a
+  natural-language phrase that a model may silently ignore.
 
 `creative_plan` is optional and contains section roles and goals. It explains
 the intended structure, but the executable timeline is authoritative. A plan
@@ -172,6 +175,14 @@ graphics. Whether a configured definition is supported by a selected renderer
 is a capability validation performed by ProjectService before preview or
 commit.
 
+The installed preview baseline is `caption.clean@1.0.0`. Its versioned
+parameters describe font family/size/weight, colors, stroke, background,
+padding, line spacing, corner radius, maximum width, alignment, and bottom
+margin. The schema remains open to additional registered caption components;
+unknown names, versions, or parameters fail closed. The implemented audio
+ducking group is `speech`, valid on music clips and driven by active source or
+voiceover audio at render time.
+
 ### Extensible visual motion and transitions
 
 Visual motion and transitions are versioned definition references rather than
@@ -241,6 +252,12 @@ committed work:
 - Skills used by the project;
 - motion/graphic components;
 - analysis model configurations relevant to the revision provenance.
+
+Every Caption or Graphic component referenced by the Timeline must have a
+matching name and exact version in `dependencies.components`. Registry-backed
+components additionally pin the approved bundle digest in `content_hash` when
+they are introduced. This is a ProjectDoc invariant, not an Agent convention,
+so UI- and Agent-origin Patches follow the same reproducibility rule.
 
 Secrets, vendor file handles, temporary model session IDs, and runtime
 credentials are never stored in ProjectDoc.

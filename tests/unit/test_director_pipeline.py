@@ -73,7 +73,9 @@ class RepairingProvider:
             moment_ids=("invented_moment",),
             summary="Initial proposal",
             explanation="Initial proposal",
-            music_strategy=MusicStrategy(mode="music_bed"),
+            music_strategy=MusicStrategy(
+                mode="music_bed", asset_id="invented_music_asset"
+            ),
         )
 
     async def repair_first_cut(self, context, decision, review):

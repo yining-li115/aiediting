@@ -155,6 +155,12 @@ Remotion is the React composition and preview layer:
 - captions, title cards, branding, and parameterized motion graphics;
 - frame-driven compositions that read the same ProjectDoc contract.
 
+Generated Remotion implementations follow the candidate -> sandbox validation
+-> explicit approval -> immutable registry lifecycle in
+`REMOTION_COMPONENTS_V1.md`. Candidate source and bundles are stored as data,
+outside the product source tree. Registry publication alone does not authorize
+a capability in ProjectDoc; the selected renderer must also support it.
+
 Both sit behind rendering ports. Neither owns project state. Adding Remotion
 must not introduce a Remotion-only project format or duplicate timing rules.
 

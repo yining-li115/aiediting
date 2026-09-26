@@ -14,21 +14,36 @@ from aive.contracts.conversation import (
     CreateAgentTurnRequest,
     MomentSearchQuery,
     PatchProposal,
+    PreviewAnnotation,
     ProposePatchCall,
     SearchMomentsCall,
     WorkspaceSelection,
 )
 from aive.contracts.patch import PatchScope
 from aive.contracts.patch_project import SetCreativePlan, SetTimelineDuration
+from aive.contracts.patch_project import AddTrack
 from aive.contracts.patch_timeline import (
     DeleteAudioClip,
     DeleteVisualClip,
+    SetAudioDucking,
     SetAudioGain,
     SetAudioOutput,
     SetAudioPlayback,
     SetVideoPlayback,
+    SetVisualCrop,
     SetVisualOutput,
+    SetVisualReframe,
 )
+from aive.contracts.captions import default_caption_style
+from aive.contracts.timeline import (
+    AudioClip,
+    AudioTrack,
+    CaptionCue,
+    CaptionTrack,
+    CropRect,
+    ReframeSpec,
+)
+from aive.contracts.time import FrameRange, SourceRange
 from aive.contracts.project_doc import (
     DependencyRef,
     DependencySet,
@@ -88,6 +103,32 @@ def test_agent_turn_request_binds_workspace_to_base_revision() -> None:
                 **request.model_dump(mode="json"),
                 "workspace": {"revision_id": "revision_other"},
             }
+        )
+
+
+def test_preview_annotations_are_revision_bound_and_unique() -> None:
+    annotation = PreviewAnnotation(
+        annotation_id="annotation_1",
+        revision_id="revision_current",
+        artifact_id="artifact_preview",
+        output_range=FrameRange(start_frame=30, duration_frames=10),
+        comment="这里节奏太慢，缩短一点。",
+    )
+    workspace = WorkspaceSelection(
+        revision_id="revision_current",
+        preview_annotations=(annotation,),
+    )
+
+    assert workspace.preview_annotations == (annotation,)
+    with pytest.raises(ValidationError, match="annotation revision"):
+        WorkspaceSelection(
+            revision_id="revision_other",
+            preview_annotations=(annotation,),
+        )
+    with pytest.raises(ValidationError, match="duplicate preview annotation"):
+        WorkspaceSelection(
+            revision_id="revision_current",
+            preview_annotations=(annotation, annotation),
         )
 
 
@@ -251,4 +292,81 @@ def test_continuous_patch_contract_accepts_closed_structural_edit_operations() -
         "set_audio_playback",
         "set_timeline_duration",
         "set_creative_plan",
+    ]
+
+
+def test_continuous_patch_contract_accepts_renderable_crop_and_reframe() -> None:
+    proposal = PatchProposal(
+        summary="Crop and center the selected shot",
+        rationale="The requested framing is bounded to one existing clip.",
+        scope=PatchScope(kind="bounded", target_ids=("clip_visual_1",)),
+        operations=(
+            SetVisualCrop(
+                operation_id="operation_crop_visual",
+                clip_id="clip_visual_1",
+                crop=CropRect(x=0.1, y=0.1, width=0.8, height=0.8),
+            ),
+            SetVisualReframe(
+                operation_id="operation_center_visual",
+                clip_id="clip_visual_1",
+                reframe=ReframeSpec(mode="center"),
+            ),
+        ),
+    )
+
+    assert [operation.op for operation in proposal.operations] == [
+        "set_visual_crop",
+        "set_visual_reframe",
+    ]
+
+
+def test_continuous_patch_contract_accepts_caption_and_music_layers() -> None:
+    proposal = PatchProposal(
+        summary="Add captions and a licensed music bed",
+        rationale="Both layers use authorized, renderer-supported contracts.",
+        scope=PatchScope(kind="bounded", target_ids=("project_chat",)),
+        operations=(
+            AddTrack(
+                operation_id="operation_add_captions",
+                track=CaptionTrack(
+                    track_id="captions_new",
+                    style=default_caption_style("caption_style_new"),
+                    cues=(
+                        CaptionCue(
+                            cue_id="caption_new",
+                            output=FrameRange(start_frame=0, duration_frames=30),
+                            text="Hello",
+                            source="generated",
+                        ),
+                    ),
+                ),
+            ),
+            AddTrack(
+                operation_id="operation_add_music",
+                track=AudioTrack(
+                    track_id="music_new",
+                    role="music",
+                    clips=(
+                        AudioClip(
+                            clip_id="music_clip_new",
+                            asset_id="asset_music",
+                            source=SourceRange(start=0, end=1_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=30),
+                            gain_db=-18,
+                        ),
+                    ),
+                ),
+            ),
+            SetAudioDucking(
+                operation_id="operation_duck_music",
+                clip_id="music_clip_existing",
+                ducking_group="speech",
+            ),
+        ),
+    )
+
+    assert [operation.op for operation in proposal.operations] == [
+        "add_track",
+        "add_track",
+        "set_audio_ducking",
     ]

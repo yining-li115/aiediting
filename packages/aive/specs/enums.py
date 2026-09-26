@@ -108,6 +108,9 @@ VIDEO_SUFFIXES: frozenset[str] = frozenset(
 PHOTO_SUFFIXES: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".bmp", ".tiff"}
 )
+AUDIO_SUFFIXES: frozenset[str] = frozenset(
+    {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+)
 
 # --- user intent -------------------------------------------------------------
 

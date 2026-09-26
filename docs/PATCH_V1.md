@@ -131,7 +131,7 @@ field operations while retaining strict validation.
 | `set_audio_playback` | `clip_id`, `playback` | Set constant or variable audio time mapping |
 | `set_audio_gain` | `clip_id`, `gain_db` | Set gain from -96 dB through +24 dB |
 | `set_audio_fades` | `clip_id`, fade fields | Set non-negative fade-in and fade-out frames together |
-| `set_audio_ducking` | `clip_id`, `ducking_group` | Set or clear the ducking group |
+| `set_audio_ducking` | `clip_id`, `ducking_group` | Set or clear the ducking group; the current renderer implements `speech` on music clips |
 
 ### Captions
 
@@ -141,7 +141,7 @@ field operations while retaining strict validation.
 | `update_caption_text` | `cue_id`, `text` | Replace cue text without changing timing |
 | `set_caption_output` | `cue_id`, `output` | Set cue position and duration together |
 | `delete_caption` | `cue_id` | Remove one cue |
-| `set_caption_style` | `track_id`, `style` | Replace the complete versioned track style |
+| `set_caption_style` | `track_id`, `style` | Replace the complete versioned track style; the installed baseline is `caption.clean@1.0.0` |
 
 ### Graphics
 

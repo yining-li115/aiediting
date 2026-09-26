@@ -16,6 +16,7 @@ Repository implementation rules and delivery order are defined in:
 - [ProjectDoc v1 Contract](docs/PROJECT_DOC_V1.md)
 - [Patch v1 Contract](docs/PATCH_V1.md)
 - [Revision and Commit State Machine](docs/REVISION_COMMIT_STATE_MACHINE.md)
+- [Remotion Component Registry and Sandbox](docs/REMOTION_COMPONENTS_V1.md)
 
 Current state: the Project kernel, immutable Revision history, browser project
 creation, media upload/understanding, autonomous first cut, revision-bound
@@ -32,7 +33,20 @@ uv sync --extra dev          # Python 3.11+, pinned by pyproject
 uv run alembic upgrade head  # create or upgrade the schema
 ```
 
-`ffmpeg` and `ffprobe` must be on PATH.
+`ffmpeg`, `ffprobe`, and fontconfig's `fc-match` must be on PATH. Fontconfig is
+used to resolve the exact installed font file for `caption.clean@1.0.0`.
+
+The generated Remotion component validator has a separate pinned Node runtime:
+
+```bash
+cd apps/remotion
+npm install
+npm run install-browser
+```
+
+This installs Remotion's managed Headless Shell under ignored `node_modules`;
+it does not use the developer's Chrome profile. Candidate source and build
+artifacts are stored under the configured object-storage root, not in Git.
 
 ## Verify block A end to end
 
@@ -80,8 +94,11 @@ Three boundaries that must not blur:
 ## Configuration
 
 Copy `.env.example` to `.env`. Every model role is configured separately —
-there is deliberately no global `AIVE_MODEL`. All roles default to `mock`, so
-the whole skeleton runs offline with no API keys and no cost.
+there is deliberately no global `AIVE_MODEL`. The Director must resolve to a
+real model and has no offline or keyword fallback. Missing credentials,
+invalid model output, and rejected tool decisions fail the Agent Job visibly
+without changing the current Revision. Other roles still have explicit local
+fixtures while their production paths are being qualified.
 
 For owned/synthetic investor-demo footage, the Continuous Editing Director can
 use pinned Gemini models through the existing provider port:
@@ -104,6 +121,7 @@ developer database:
 ./.venv/bin/python scripts/check_continuous_edit_golden.py
 ```
 
-It validates Trim, Move, Delete, clarification, immutable Revision history,
+It validates Trim, Move, Delete, Moment-grounded Replace, Crop/Center Reframe,
+Constant Speed, Gain/Fade, clarification, immutable Revision history,
 source-audio pairing, and real FFmpeg preview files. The command calls the
 configured Director models and therefore consumes external quota.

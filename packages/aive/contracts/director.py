@@ -117,10 +117,22 @@ class MusicStrategy(ContractModel):
     """Audio direction without inventing or licensing a media asset."""
 
     mode: MusicMode = "source_only"
+    asset_id: StableId | None = None
     mood_tags: tuple[str, ...] = Field(default=(), max_length=8)
     energy_curve: MusicEnergyCurve = "steady"
     duck_under_speech: bool = True
+    gain_db: float = Field(default=-18.0, ge=-48.0, le=0.0)
+    fade_in_frames: int = Field(default=15, ge=0, le=300)
+    fade_out_frames: int = Field(default=15, ge=0, le=300)
     rationale: str | None = Field(default=None, max_length=1_000)
+
+    @model_validator(mode="after")
+    def asset_matches_mode(self) -> MusicStrategy:
+        if self.mode == "music_bed" and self.asset_id is None:
+            raise ValueError("music_bed requires an authorized asset_id")
+        if self.mode != "music_bed" and self.asset_id is not None:
+            raise ValueError("music asset_id is only valid for music_bed")
+        return self
 
 
 class FirstCutDecision(ContractModel):

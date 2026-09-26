@@ -12,9 +12,9 @@ from ..contracts.media import UploadAssetItem, UploadAssetsRequest, UploadedAsse
 from ..contracts.patch import Patch, PatchScope
 from ..contracts.patch_project import AddAsset
 from ..contracts.project_doc import AssetRef, AssetRole
-from ..material.probe import ProbeError, probe_asset
+from ..material.probe import ProbeError, ffprobe, probe_asset
 from ..project.repository import RevisionWriteResult
-from ..specs.enums import PHOTO_SUFFIXES, VIDEO_SUFFIXES
+from ..specs.enums import AUDIO_SUFFIXES, PHOTO_SUFFIXES, VIDEO_SUFFIXES
 from ..storage import ORIGINAL, StorageProvider, project_key, safe_name, sha256_of
 from .repository import AssetIdentityConflict, MediaAssetRecord, MediaAssetRepository
 
@@ -22,7 +22,7 @@ from .repository import AssetIdentityConflict, MediaAssetRecord, MediaAssetRepos
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 DEFAULT_MAX_SOURCE_BYTES = 10 * 1024**3
 DEFAULT_MAX_REFERENCE_BYTES = 5 * 1024**3
-SUPPORTED_MEDIA_SUFFIXES = VIDEO_SUFFIXES | PHOTO_SUFFIXES
+SUPPORTED_MEDIA_SUFFIXES = VIDEO_SUFFIXES | PHOTO_SUFFIXES | AUDIO_SUFFIXES
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class IncomingMedia:
 
 @dataclass(frozen=True)
 class MediaProbeResult:
-    kind: Literal["video", "photo"]
+    kind: Literal["video", "photo", "audio"]
     duration_seconds: float
     width: int
     height: int
@@ -85,6 +85,28 @@ def _default_probe(
     asset_id: str,
     storage_key: str,
 ) -> MediaProbeResult:
+    if path.suffix.lower() in AUDIO_SUFFIXES:
+        info = ffprobe(path)
+        streams = info.get("streams", [])
+        audio = next(
+            (stream for stream in streams if stream.get("codec_type") == "audio"),
+            None,
+        )
+        if audio is None:
+            raise ProbeError(f"{path} has no audio stream")
+        duration = float(
+            info.get("format", {}).get("duration") or audio.get("duration") or 0
+        )
+        if duration <= 0:
+            raise ProbeError(f"{path} reports a non-positive duration")
+        return MediaProbeResult(
+            kind="audio",
+            duration_seconds=duration,
+            width=1,
+            height=1,
+            fps=0,
+            has_audio=True,
+        )
     asset = probe_asset(path, project_id, asset_id, storage_key)
     return MediaProbeResult(
         kind=asset.kind,
@@ -199,7 +221,7 @@ class MediaUploadApplication:
         if suffix not in SUPPORTED_MEDIA_SUFFIXES:
             raise _rejection(
                 "unsupported_media_type",
-                f"{name!r} is not a supported video or photo",
+                f"{name!r} is not a supported video, photo, or audio file",
                 item.asset_id,
                 name,
             )
@@ -255,6 +277,15 @@ class MediaUploadApplication:
                 raise _rejection(
                     "reference_requires_video",
                     f"{name!r} is a photo; reference uploads must be videos",
+                    item.asset_id,
+                    name,
+                )
+            if probed.kind == "audio" and not (
+                {"music", "voiceover", "sfx"} & set(item.roles)
+            ):
+                raise _rejection(
+                    "audio_requires_audio_role",
+                    f"{name!r} must be uploaded as music, voiceover, or sfx",
                     item.asset_id,
                     name,
                 )

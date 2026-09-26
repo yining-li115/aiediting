@@ -229,8 +229,14 @@ class BaseProvider:
                 retries=attempt,
             )
         )
+        detail = (
+            f"{type(last_error).__name__}: {last_error}"
+            if last_error is not None
+            else "unknown provider error"
+        )
         raise RuntimeError(
-            f"{self.name} ({self.role.value}) failed after {attempt} attempts"
+            f"{self.name} ({self.role.value}) failed after {attempt} attempts: "
+            f"{detail}"
         ) from last_error
 
     @staticmethod

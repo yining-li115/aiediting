@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing import Protocol
 
 from ..contracts.patch import Patch
+from ..contracts.captions import CLEAN_CAPTION_COMPONENT, CLEAN_CAPTION_VERSION
 from ..contracts.project import CreateProjectRequest
 from ..contracts.project_doc import AssetRef, DependencyRef, DependencySet
 from ..contracts.revision import ProjectRevision, RestoreRevisionRequest
@@ -77,7 +78,13 @@ class ProjectRevisionApplication:
         self._capabilities = capabilities
         self._asset_authorizer = asset_authorizer
         self._initial_dependencies = initial_dependencies or DependencySet(
-            renderer=DependencyRef(name="ffmpeg", version="dev")
+            renderer=DependencyRef(name="ffmpeg", version="dev"),
+            components=(
+                DependencyRef(
+                    name=CLEAN_CAPTION_COMPONENT,
+                    version=CLEAN_CAPTION_VERSION,
+                ),
+            ),
         )
         self._id_factory = id_factory
         self._clock = clock

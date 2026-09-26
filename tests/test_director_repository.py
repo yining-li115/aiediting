@@ -73,7 +73,7 @@ def test_enqueue_is_atomic_and_idempotent(repository) -> None:
         run_id="run_first",
         job_id="job_first",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
     replay = repo.enqueue(
@@ -81,7 +81,7 @@ def test_enqueue_is_atomic_and_idempotent(repository) -> None:
         run_id="run_unused",
         job_id="job_unused",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
 
@@ -98,7 +98,7 @@ def test_idempotency_key_cannot_change_the_request(repository) -> None:
         run_id="run_first",
         job_id="job_first",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
 
@@ -108,7 +108,7 @@ def test_idempotency_key_cannot_change_the_request(repository) -> None:
             run_id="run_second",
             job_id="job_second",
             request_hash="b" * 64,
-            provider="offline-director",
+            provider="fixture-director",
             provider_version="1",
         )
 
@@ -141,6 +141,6 @@ def test_enqueue_rejects_a_non_current_base_revision(repository) -> None:
             run_id="run_stale",
             job_id="job_stale",
             request_hash="a" * 64,
-            provider="offline-director",
+            provider="fixture-director",
             provider_version="1",
         )

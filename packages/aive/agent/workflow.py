@@ -128,6 +128,17 @@ class AutonomousProjectWorkflow:
                 analysis_job_id = result.get("analysis_job_id")
         if analysis_job_id is not None:
             await self.run_analysis_then_first_cut(analysis_job_id)
+        else:
+            # A music-only upload has no Shot/Moment analysis job. It may still
+            # complete the inputs of a project whose visual evidence was
+            # analyzed earlier, so give the normal first-cut gate a chance to
+            # enqueue without treating the audio file as visual material.
+            ticket = self._first_cuts.enqueue_automatic(
+                project_id,
+                processing_job_id,
+            )
+            if ticket is not None:
+                await self._first_cuts.run(ticket.run.job_id)
 
     async def run_analysis_then_first_cut(self, analysis_job_id: str) -> None:
         project_id, _ = self._analysis.job_targets(analysis_job_id)

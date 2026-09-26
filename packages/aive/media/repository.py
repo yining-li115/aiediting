@@ -9,7 +9,7 @@ from typing import Literal, Protocol
 from ..contracts.project_doc import AssetRef
 
 
-MediaKind = Literal["video", "photo"]
+MediaKind = Literal["video", "photo", "audio"]
 MediaReadiness = Literal["uploaded", "processing", "ready", "failed"]
 
 

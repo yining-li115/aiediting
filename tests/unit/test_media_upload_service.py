@@ -175,3 +175,30 @@ def test_file_count_must_match_the_typed_manifest(tmp_path) -> None:
         application.upload_assets(_request(), ())
 
     assert caught.value.issues[0].code == "file_manifest_mismatch"
+
+
+def test_music_audio_upload_creates_an_authorized_audio_asset(tmp_path) -> None:
+    def audio_probe(path, project_id, asset_id, storage_key):
+        return MediaProbeResult(
+            kind="audio",
+            duration_seconds=12.0,
+            width=1,
+            height=1,
+            fps=0.0,
+            has_audio=True,
+        )
+
+    application = MediaUploadApplication(
+        storage=LocalStorage(tmp_path / "storage"),
+        assets=MemoryAssets(),
+        projects=CapturingProjects(),
+        probe=audio_probe,
+    )
+
+    result = application.upload_assets(
+        _request(roles=("music",)),
+        (IncomingMedia("licensed-bed.mp3", BytesIO(b"valid media")),),
+    )
+
+    assert result.assets[0].asset.kind == "audio"
+    assert result.assets[0].asset.roles == ("music",)

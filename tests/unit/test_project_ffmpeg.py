@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
+
+from aive.config import settings
+from aive.contracts.captions import default_caption_style
 
 from aive.contracts.project_doc import (
     AssetRef,
     CaptionCue,
     CaptionStyle,
     CaptionTrack,
+    AudioClip,
+    AudioTrack,
     DependencyRef,
     DependencySet,
     FrameRange,
@@ -68,7 +75,10 @@ def _doc(*, clips: tuple[VideoClip, ...] | None = None) -> ProjectDoc:
             ),
         ),
         dependencies=DependencySet(
-            renderer=DependencyRef(name="ffmpeg", version="1")
+            renderer=DependencyRef(name="ffmpeg", version="1"),
+            components=(
+                DependencyRef(name="caption.clean", version="1.0.0"),
+            ),
         ),
     )
 
@@ -113,8 +123,8 @@ def test_unimplemented_caption_layer_fails_closed() -> None:
         track_id="captions",
         style=CaptionStyle(
             style_id="style",
-            component_name="captions",
-            component_version="1",
+            component_name="caption.unknown",
+            component_version="1.0.0",
         ),
         cues=(
             CaptionCue(
@@ -133,5 +143,230 @@ def test_unimplemented_caption_layer_fails_closed() -> None:
         }
     )
 
-    with pytest.raises(ProjectRenderUnsupported, match="caption rendering"):
+    with pytest.raises(ProjectRenderUnsupported, match="caption component"):
         ProjectDocFFmpegRenderer().validate(document)
+
+
+def test_clean_caption_layer_is_renderable() -> None:
+    document = _doc()
+    caption_track = CaptionTrack(
+        track_id="captions",
+        style=CaptionStyle(
+            style_id="style",
+            component_name="caption.clean",
+            component_version="1.0.0",
+            parameters={"font_family": "Arial", "font_size": 48},
+        ),
+        cues=(
+            CaptionCue(
+                cue_id="cue",
+                output=FrameRange(start_frame=0, duration_frames=30),
+                text="Hello, investor demo",
+                source="user",
+            ),
+        ),
+    )
+    document = document.model_copy(
+        update={
+            "timeline": document.timeline.model_copy(
+                update={"tracks": document.timeline.tracks + (caption_track,)}
+            )
+        }
+    )
+
+    ProjectDocFFmpegRenderer().validate(document)
+
+
+def test_speech_ducking_requires_a_music_clip_and_speech_bus() -> None:
+    document = _doc()
+    document = document.model_copy(
+        update={
+            "assets": document.assets
+            + (AssetRef(asset_id="asset_music", kind="audio", roles=("music",)),),
+            "timeline": document.timeline.model_copy(
+                update={
+                    "tracks": document.timeline.tracks
+                    + (
+                        AudioTrack(
+                            track_id="source_audio",
+                            role="source",
+                            clips=(
+                                AudioClip(
+                                    clip_id="source_audio_clip",
+                                    asset_id="asset_a",
+                                    source=SourceRange(start=0, end=4_000, timescale=1_000),
+                                    output=FrameRange(start_frame=0, duration_frames=120),
+                                ),
+                            ),
+                        ),
+                        AudioTrack(
+                            track_id="music",
+                            role="music",
+                            clips=(
+                                AudioClip(
+                                    clip_id="music_clip",
+                                    asset_id="asset_music",
+                                    source=SourceRange(start=0, end=4_000, timescale=1_000),
+                                    output=FrameRange(start_frame=0, duration_frames=120),
+                                    ducking_group="speech",
+                                ),
+                            ),
+                        ),
+                    )
+                }
+            ),
+        }
+    )
+
+    ProjectDocFFmpegRenderer().validate(document)
+
+    no_speech = document.model_copy(
+        update={
+            "timeline": document.timeline.model_copy(
+                update={
+                    "tracks": tuple(
+                        track
+                        for track in document.timeline.tracks
+                        if not (track.kind == "audio" and track.role == "source")
+                    )
+                }
+            )
+        }
+    )
+    with pytest.raises(ProjectRenderUnsupported, match="speech bus"):
+        ProjectDocFFmpegRenderer().validate(no_speech)
+
+
+def test_caption_and_speech_ducking_render_to_a_playable_file(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    music = tmp_path / "music.m4a"
+    subprocess.run(
+        [
+            settings.ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x180:r=30:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:d=2",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            settings.ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:sample_rate=48000:d=2",
+            "-c:a",
+            "aac",
+            str(music),
+        ],
+        check=True,
+    )
+    document = ProjectDoc(
+        project_id="project_caption_audio",
+        revision_id="revision_caption_audio",
+        intent=ProjectIntent(task_mode="autonomous", target_duration_frames=60),
+        assets=(
+            AssetRef(asset_id="asset_source", kind="video"),
+            AssetRef(asset_id="asset_music", kind="audio", roles=("music",)),
+        ),
+        timeline=Timeline(
+            duration_frames=60,
+            output=OutputSettings(
+                width=320,
+                height=180,
+                fps=Rational(num=30, den=1),
+            ),
+            tracks=(
+                VideoTrack(
+                    track_id="primary",
+                    role="primary",
+                    clips=(
+                        VideoClip(
+                            clip_id="visual",
+                            asset_id="asset_source",
+                            source=SourceRange(start=0, end=2_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=60),
+                        ),
+                    ),
+                ),
+                AudioTrack(
+                    track_id="source_audio",
+                    role="source",
+                    clips=(
+                        AudioClip(
+                            clip_id="source_audio_clip",
+                            asset_id="asset_source",
+                            source=SourceRange(start=0, end=2_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=60),
+                        ),
+                    ),
+                ),
+                AudioTrack(
+                    track_id="music",
+                    role="music",
+                    clips=(
+                        AudioClip(
+                            clip_id="music_clip",
+                            asset_id="asset_music",
+                            source=SourceRange(start=0, end=2_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=60),
+                            gain_db=-12,
+                            ducking_group="speech",
+                        ),
+                    ),
+                ),
+                CaptionTrack(
+                    track_id="captions",
+                    style=default_caption_style("caption_style"),
+                    cues=(
+                        CaptionCue(
+                            cue_id="cue",
+                            output=FrameRange(start_frame=5, duration_frames=45),
+                            text="字幕 Caption",
+                            source="user",
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        dependencies=DependencySet(
+            renderer=DependencyRef(name="ffmpeg", version="1"),
+            components=(
+                DependencyRef(name="caption.clean", version="1.0.0"),
+            ),
+        ),
+    )
+    output = tmp_path / "render.mp4"
+
+    result = ProjectDocFFmpegRenderer().render(
+        document,
+        "proxy",
+        output,
+        {"asset_source": source, "asset_music": music},
+    )
+
+    assert output.is_file()
+    assert result.duration_sec == pytest.approx(2, abs=0.05)
+    assert result.file_size > 0

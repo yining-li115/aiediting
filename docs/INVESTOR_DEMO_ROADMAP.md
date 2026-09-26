@@ -102,8 +102,7 @@ Stage 3.
 
 Status: the model-capable vertical slice is implemented behind an explicit
 VideoAgentHarness runtime boundary. The Harness freezes an AgentRunContext,
-invokes an offline or OpenAI-compatible Gemini/Volcengine Director, and owns
-deterministic review plus
+invokes an OpenAI-compatible Gemini/Volcengine Director, and owns deterministic review plus
 at most one bounded AutoFix. The application layer then creates a typed
 first-cut Patch through ProjectService, stores one immutable candidate Agent
 Revision, automatically renders it, runs deterministic plus optional
@@ -112,12 +111,16 @@ AutoFix for repairable blocking issues, and atomically accepts only an approved
 candidate.
 The browser exposes progress, explanation, and the Reviewer summary. Failed
 providers, exhausted repairs, render failures, and final review rejection preserve
-the previous revision. A production-model golden run, rendered captions/music,
-effect-aware repair beyond the first-cut subset remain.
+the previous revision. The first cut now turns Moment ASR into a versioned
+`caption.clean` track, selects an explicitly authorized music Asset, applies
+gain/fades/speech ducking, and renders both layers in the revision-bound
+preview/export path. A production-model golden run for this new layer,
+animated typography, catalog-backed licensing, and effect-aware repair beyond
+the first-cut subset remain.
 
 Deliver:
 
-- one production-configured media observer plus offline fake;
+- one production-configured media observer plus explicit test fake;
 - `search_moments` and `inspect_media` tool contracts;
 - Video Agent Harness, Director context, and tool loop;
 - first-cut Patch generation and preview review;
@@ -137,15 +140,31 @@ Accepted low-risk proposals use the shared ProjectService commit path, enqueue
 a Revision-bound preview, persist an operation-derived explanation, and update
 the left-side browser conversation. Preview playback now freezes an absolute
 Revision frame into the turn. The formal model schema and shared Patch path
-support clip-boundary Trim and whole-clip Move/Delete; one real Gemini
-Golden Run has now completed Trim -> Move -> Delete -> clarification in one
-Conversation. Every accepted turn passed a no-write ProjectService/renderer
-dry-run, committed a child Revision, kept source audio paired, and produced a
-revision-bound FFmpeg preview; the ambiguous turn produced only a question.
+support clip-boundary Trim, whole-clip Move/Delete, Moment-grounded Replace,
+Crop/Center Reframe, Constant Speed, and source-audio Gain/Fade. One real
+Gemini Golden Run has now completed all of those operations plus clarification
+in one Conversation. Every accepted turn passed a no-write
+ProjectService/renderer dry-run, committed a child Revision, kept source audio
+paired, and produced a revision-bound FFmpeg preview; the ambiguous turn
+produced only a question.
 This qualifies the temporary Gemini chain and synthetic edit fixture, not the
 final production model or investor-demo story footage. See
 `CONTINUOUS_EDITING_V1.md` for the exact supported subset and remaining
 boundaries.
+
+Preview Annotation v1 now supplies the preview-first selection layer before a
+full timeline workspace. A user can attach an exact frame/range and comment
+from a ready current-Revision preview to the left conversation. The durable
+WorkspaceSelection and AgentTurnContext keep that quote bound to its Revision
+and Artifact, deterministic grounding maps it to timeline IDs, and every
+resulting change still goes through typed Patch and ProjectService. Spatial
+regions remain a later extension.
+
+Caption and audio Patch operations are now admitted by the bounded tool loop:
+the Director can add a complete caption or authorized audio track, edit cue
+text/timing/style, and change gain/fades/speech ducking. The new path is
+deterministically preflighted and media-tested, but still needs a real-model
+multi-turn Golden Run before it is considered production-qualified.
 
 Deliver:
 
@@ -176,7 +195,7 @@ updates only the mapped output range.
 Deliver:
 
 - Remotion Player reading the shared ProjectDoc timing model;
-- captions, title cards, brand components, and approved motion graphics;
+- animated captions, title cards, brand components, and approved motion graphics;
 - preview/export consistency regression fixtures;
 - polished progress, comparison, history, and recovery UX.
 

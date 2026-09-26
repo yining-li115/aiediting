@@ -23,11 +23,14 @@ upload -> proxy/thumbnail -> Shots/ASR/Moments
   -> browser playback
 ```
 
-The offline Director remains the repository default so tests and recovery
-fixtures work without credentials or paid calls. The shared OpenAI-compatible
-Director adapter serves pinned Gemini or Volcengine model cards through the
-same `DirectorProvider` port; configuring either does not change
-ProjectService, Patch, Revision, or rendering behavior.
+Runtime Director resolution requires a real Gemini or Volcengine model card.
+There is no offline Director adapter, keyword policy, or rule-authored first-cut
+fallback. Missing credentials, invalid structured output, and exhausted
+real-model availability fail the durable Job, preserve the current Revision,
+and surface the recorded problem to the browser. Tests remain offline by
+injecting explicit scripted fixtures that are not registered in runtime code.
+Changing the real Director model does not change ProjectService, Patch,
+Revision, or rendering behavior.
 
 `VideoAgentHarness` is the runtime boundary around model-driven work, not a
 second application or project state. It owns context construction, provider
@@ -76,10 +79,16 @@ These are professional stages inside one composite Director call, not peer
 Agents with write access. The provider cannot return a ProjectDoc, Patch,
 renderer command, SQL, executable code, or an unregistered media identity.
 
-The current FFmpeg ProjectDoc renderer does not render captions. Caption copy
-is therefore recorded as a strategy and explicitly described as not yet
-applied; it is not inserted into a hidden or unrenderable track. A music-bed
-strategy is rejected unless an authorized music Asset exists.
+The Director now materializes a speech/highlight caption strategy into one
+`caption.clean@1.0.0` CaptionTrack using ASR text attached to the selected
+Moments. Cue timing is mapped to the exact selected output clips. A music-bed
+strategy must name one exact authorized `music` Asset from the frozen context;
+the Patch builder tiles that Asset across the resulting timeline and applies
+the Director's gain, fade, and speech-ducking parameters. Unknown or unlicensed
+Asset identities still fail deterministic review.
+`ProjectIntent.caption_policy` and `music_policy` are also deterministic
+review inputs: `none` forbids the corresponding layer, while `auto` requires it
+when selected speech or an authorized music Asset makes it executable.
 
 `AIVE_ROLE_DIRECTOR_MODEL=doubao-vision` selects the production Volcengine Ark
 endpoint configured by `AIVE_ARK_BASE_URL`, `AIVE_ARK_API_KEY`, and
@@ -174,22 +183,23 @@ terminal for that Agent Run and preserves the previous committed Revision.
 - A render or review failure leaves the previous committed Revision and preview
   current.
 
-## 8. Offline Director policy
+## 8. Director failure policy
 
-The current provider:
+The Director may retry the same real provider within its bounded transport
+policy and may switch to another explicitly configured real model only for
+quota, timeout, or temporary server-capacity failures. Invalid structured
+output, an unsafe or unsupported Patch, failed scope/lock checks, and rejected
+review do not trigger another model or a local edit policy.
 
-- selects only Moments marked usable;
-- preserves ProjectDoc asset order and source chronology;
-- fills up to `intent.target_duration_frames`;
-- trims only the final selected source span when required;
-- creates one gapless primary visual track;
-- creates matching source-audio clips only for video Assets with audio;
-- represents photos as three-second holds, bounded by remaining target frames;
-- writes a CreativePlan explanation from the selected Moment evidence;
-- derives deterministic creative, caption, and source-audio strategies so the
-  same review path is exercised without a model.
+On terminal failure:
 
-This policy is deterministic infrastructure, not the final creative quality.
+- the Agent Run and Job store an actionable error summary;
+- the browser displays that error instead of a fabricated result;
+- no Patch is submitted and no candidate becomes current; and
+- the last committed Revision and its preview remain available.
+
+Full exception traces stay in server logs. The Job API exposes the concise
+error message needed by the user rather than embedding a traceback in the UI.
 
 ## 9. Provider and Patch constraints
 
@@ -226,7 +236,8 @@ documented in `CONTINUOUS_EDITING_V1.md`. Reference remake remains later work.
 The first-cut model/context/review path is implemented, but production model
 quality is not claimed until a real golden-footage run succeeds. Default
 offline review does not claim visual judgment.
-Rendered captions, a licensed music library, more capable effect-aware repair,
+Animated/word-timed captions, a searchable licensed music catalog with stored
+license evidence, more capable effect-aware repair,
 full workspace selection, and the wider continuous-edit operation set belong
 to following slices. The formal continuous-edit schema already includes
 clip-boundary Trim and whole-clip Move/Delete. A real Gemini model has completed

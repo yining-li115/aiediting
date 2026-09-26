@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     media_root: Path = Path("./data/media")
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
+    remotion_runtime_root: Path = Path("./apps/remotion")
 
     # Model selection lives in aive.model_registry, not here. Per-role
     # overrides go through AIVE_ROLE_<ROLE>_MODEL, which that module reads.

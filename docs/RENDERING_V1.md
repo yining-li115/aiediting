@@ -59,7 +59,7 @@ records provider/version, inspection-derived and model-derived issues, whether
 a visual review actually occurred, and the final accepted decision. A
 rejected or failed review cannot advance the project head.
 
-The default offline provider performs deterministic decode, duration,
+The default deterministic Reviewer performs decode, duration,
 dimension, representative-frame, audio-presence, and sharpness checks. A
 configured Reviewer provider may add multimodal creative judgment through the
 same contract. Manual preview and export requests are not automatically sent
@@ -78,7 +78,7 @@ remains current.
 The preflight does not replace rendered-output review or user confirmation.
 Those remain required for the later high-impact Candidate gate.
 
-## 4. Currently executable FFmpeg subset
+## 4. Currently executable hybrid subset
 
 The current provider renders:
 
@@ -88,6 +88,18 @@ The current provider renders:
 - constant playback rates, normalized crop, and center reframe;
 - explicit ProjectDoc audio clips with constant playback, gain, fades, delay,
   and mixing;
+- authorized music/voiceover/SFX audio Assets, including the audio-only proxy
+  and waveform-thumbnail ingest path;
+- `speech` ducking on music clips through an FFmpeg sidechain compressor fed
+  by active source and voiceover tracks;
+- `caption.clean@1.0.0` CaptionTracks. The renderer validates the versioned
+  component parameters, resolves the registered font through fontconfig,
+  rasterizes transparent cue layers with Pillow, and overlays those layers at
+  exact ProjectDoc frame ranges for both proxy preview and HQ export;
+- approved Registry-backed Remotion Caption and Graphic components. Each exact
+  version and prop object is validated, rendered as a transparent full-frame
+  overlay in the restricted runtime, and composited at its ProjectDoc frame
+  range for full/range preview and HQ export;
 - BT.709 even-dimension H.264/AAC MP4 output;
 - proxy preview (or original media when source audio is required) and
   original-media HQ export through the same compiler path.
@@ -96,10 +108,9 @@ Until implemented and covered by media regression tests, the provider must
 reject rather than ignore:
 
 - b-roll or overlay tracks;
-- captions and graphics;
 - motion definitions, transitions, and effects;
 - face, saliency, or manual reframe;
-- variable playback and audio ducking;
+- variable playback and ducking groups other than `speech`;
 - non-BT.709 output and odd H.264 dimensions.
 
 ## 5. Extension rule
@@ -116,3 +127,19 @@ To add a capability:
 Remotion may complement FFmpeg for frame-driven captions and motion graphics.
 It must consume the same ProjectDoc and produce the same revision-bound
 Artifact contract.
+
+The generated-component lifecycle and runtime ABI are defined in
+`REMOTION_COMPONENTS_V1.md`. The configured hybrid provider now resolves exact
+published Caption and Graphic bundles and produces preview/export from the
+named Revision. A validated but unpublished candidate is never renderable, and
+published motion/transition/effect usages remain rejected until their distinct
+media-input execution paths exist.
+
+`caption.clean` remains the deterministic static baseline. Word-level
+highlighting, karaoke timing, bounce/pop motion, and other per-frame typography
+belong in new approved Remotion caption component versions rather than hidden
+conditionals inside the FFmpeg adapter.
+
+The FFmpeg renderer host must provide `ffmpeg`, `ffprobe`, and fontconfig's
+`fc-match`. A missing font runtime or unresolved component font is a render
+failure; the renderer must not silently substitute a different caption path.

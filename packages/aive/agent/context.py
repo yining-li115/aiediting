@@ -29,7 +29,7 @@ class AgentRunContextBuilder:
         }
         assets: list[AgentAssetContext] = []
         for asset in document.assets:
-            if "source" not in asset.roles:
+            if not ({"source", "music"} & set(asset.roles)):
                 continue
             status = statuses.get(asset.asset_id)
             if status is None:
@@ -40,10 +40,11 @@ class AgentRunContextBuilder:
                 raise DirectorContextError(
                     f"source Asset {asset.asset_id!r} belongs to another project"
                 )
-            if status.readiness != "ready" or status.analysis_readiness not in {
-                "ready",
-                "partial",
-            }:
+            needs_analysis = "source" in asset.roles
+            if status.readiness != "ready" or (
+                needs_analysis
+                and status.analysis_readiness not in {"ready", "partial"}
+            ):
                 raise DirectorContextError(
                     f"source Asset {asset.asset_id!r} is not ready for Director use"
                 )
@@ -58,7 +59,9 @@ class AgentRunContextBuilder:
                     height=status.height,
                     fps=status.fps,
                     has_audio=status.has_audio,
-                    analysis_readiness=status.analysis_readiness,
+                    analysis_readiness=(
+                        status.analysis_readiness if needs_analysis else "ready"
+                    ),
                 )
             )
 

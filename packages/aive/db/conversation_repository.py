@@ -189,7 +189,7 @@ class SqlAlchemyConversationRepository:
             session.flush()
             return AgentTurnTicket(
                 turn=_turn(session, row),
-                user_message=_message(message),
+                user_message=_message(session, message),
                 replayed=False,
             )
 
@@ -232,7 +232,7 @@ class SqlAlchemyConversationRepository:
                     ConversationMessageRow.id,
                 )
             ).all()
-            return tuple(_message(row) for row in rows)
+            return tuple(_message(session, row) for row in rows)
 
     def mark_running(self, job_id: str) -> AgentTurn:
         with self.session_factory.begin() as session:
@@ -374,13 +374,18 @@ def _conversation(session: Session, row: ConversationRow) -> Conversation:
         conversation_id=row.id,
         project_id=row.project_id,
         purpose=row.purpose,
-        messages=tuple(_message(message) for message in messages),
+        messages=tuple(_message(session, message) for message in messages),
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
     )
 
 
-def _message(row: ConversationMessageRow) -> ConversationMessage:
+def _message(session: Session, row: ConversationMessageRow) -> ConversationMessage:
+    workspace = None
+    if row.role == "user" and row.agent_turn_id is not None:
+        turn = session.get(AgentTurnRow, row.agent_turn_id)
+        if turn is not None and turn.resolved_scope_json is not None:
+            workspace = WorkspaceSelection.model_validate(turn.resolved_scope_json)
     return ConversationMessage(
         message_id=row.id,
         project_id=row.project_id,
@@ -390,6 +395,7 @@ def _message(row: ConversationMessageRow) -> ConversationMessage:
         agent_turn_id=row.agent_turn_id,
         base_revision_id=row.base_revision_id,
         result_revision_id=row.result_revision_id,
+        workspace=workspace,
         created_at=_aware(row.created_at),
     )
 
@@ -457,7 +463,7 @@ def _user_message(session: Session, turn_id: str) -> ConversationMessage:
     )
     if row is None:
         raise ConversationConflict(f"Agent turn {turn_id!r} has no user message")
-    return _message(row)
+    return _message(session, row)
 
 
 def _assistant_message(

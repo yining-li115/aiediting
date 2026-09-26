@@ -10,7 +10,7 @@ without answering any product question.
 from __future__ import annotations
 
 import asyncio
-import traceback
+import logging
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
@@ -22,6 +22,9 @@ from .db.models import Job
 from .db.session import get_session_factory
 from .events import publish
 from .specs.base import new_id
+
+
+logger = logging.getLogger(__name__)
 
 
 class Stage(str, Enum):
@@ -172,12 +175,9 @@ class JobRunner:
             publish(job_id, "done", result=result)
             return True
         except Exception as exc:  # noqa: BLE001 - process boundary records failure
-            message = f"{exc}"
-            self.finish(
-                job_id,
-                "failed",
-                error=f"{message}\n{traceback.format_exc()[:4000]}",
-            )
+            message = str(exc) or exc.__class__.__name__
+            logger.exception("job %s (%s) failed", job_id, self.kind_of(job_id))
+            self.finish(job_id, "failed", error=message)
             publish(job_id, "failed", error=message)
             return True
 

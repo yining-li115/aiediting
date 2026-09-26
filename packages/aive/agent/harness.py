@@ -39,7 +39,12 @@ from .render_autofix import (
     RenderAutoFixPipeline,
 )
 from .review import FirstCutReviewer
-from .turn_context import AgentTurnContextBuilder
+from .tools import ComponentAgentTools
+from .turn_context import (
+    BASE_CONTINUOUS_EDIT_TOOLS,
+    CONTINUOUS_EDIT_TOOLS,
+    AgentTurnContextBuilder,
+)
 
 
 class VideoAgentHarness:
@@ -58,12 +63,19 @@ class VideoAgentHarness:
         turn_context_builder: AgentTurnContextBuilder | None = None,
         reviewer: FirstCutReviewer | None = None,
         render_review_engine: RenderReviewEngine | None = None,
+        component_tools: ComponentAgentTools | None = None,
         max_repair_attempts: int = MAX_AUTOFIX_ATTEMPTS,
         max_render_autofix_attempts: int = MAX_RENDER_AUTOFIX_ATTEMPTS,
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder or AgentRunContextBuilder()
-        self._turn_context_builder = turn_context_builder or AgentTurnContextBuilder()
+        self._turn_context_builder = turn_context_builder or AgentTurnContextBuilder(
+            allowed_tools=(
+                CONTINUOUS_EDIT_TOOLS
+                if component_tools is not None
+                else BASE_CONTINUOUS_EDIT_TOOLS
+            )
+        )
         decision_reviewer = reviewer or FirstCutReviewer()
         self._first_cut = DirectorPipeline(
             provider=provider,
@@ -76,7 +88,10 @@ class VideoAgentHarness:
             reviewer=decision_reviewer,
             max_attempts=max_render_autofix_attempts,
         )
-        self._continuous_edit = ContinuousEditPipeline(provider)
+        self._continuous_edit = ContinuousEditPipeline(
+            provider,
+            component_tools=component_tools,
+        )
 
     @property
     def provider_name(self) -> str:
@@ -117,6 +132,7 @@ class VideoAgentHarness:
         revision: ProjectRevision,
         moments: tuple[MomentEvidence, ...],
         history: tuple[ConversationMessage, ...],
+        asset_statuses: tuple[AssetProcessingRecord, ...] = (),
     ) -> AgentTurnContext:
         return self._turn_context_builder.build(
             turn_id=turn_id,
@@ -124,6 +140,7 @@ class VideoAgentHarness:
             revision=revision,
             moments=moments,
             history=history,
+            asset_statuses=asset_statuses,
         )
 
     async def run_edit_turn(

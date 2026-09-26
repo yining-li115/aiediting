@@ -180,6 +180,13 @@ resolved stable target ID belongs in the resulting Patch.
 Every preview and export names the exact revision it consumes. A newer commit
 does not relabel an older Artifact.
 
+Preview annotations are revision-bound workspace evidence, not edit state. A
+temporal annotation names the ready preview Artifact, its Revision, an exact
+frame range, and the user's comment. It may be persisted with the Conversation
+and frozen into an AgentTurnContext, but it never mutates ProjectDoc. The
+application validates the reference and resolves its overlapping timeline IDs;
+only a later typed Patch may create a new Revision.
+
 Immediate edits may commit after validation and then render. Expensive or
 high-impact Agent edits may render a validated candidate first and wait for
 confirmation. A candidate is immutable but is not the Project's current
@@ -225,7 +232,7 @@ Do not introduce:
 
 ## 11. Implementation order
 
-The shared runtime is built in this order (items 1-6 and the offline
+The shared runtime is built in this order (items 1-6 and the model-backed
 autonomous first-cut vertical slice are now implemented):
 
 1. ProjectDoc and Patch contracts;
@@ -240,7 +247,7 @@ autonomous first-cut vertical slice are now implemented):
    export, HTTP delivery, and browser playback implemented**);
 7. Agent Harness, tools, and continuous conversational editing (**explicit
    VideoAgentHarness runtime boundary, frozen AgentRunContext, typed Moment
-   search/inspection, composite offline/OpenAI-compatible Director, structured
+   search/inspection, OpenAI-compatible Director, structured
    creative/copy/caption/music decision, deterministic review, one bounded
    AutoFix, first-cut Patch -> candidate Revision -> automatic preview ->
    post-render Reviewer -> bounded replacement AutoFix -> atomic acceptance

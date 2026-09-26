@@ -8,7 +8,6 @@ from sqlalchemy.orm import sessionmaker
 
 from aive.agent.application import DirectorApplication
 from aive.agent.harness import VideoAgentHarness
-from aive.agent.provider import OfflineDirectorProvider
 from aive.agent.render_review import RenderReviewEngine
 from aive.agent.render_review_application import RenderReviewApplication
 from aive.agent.workflow import FirstCutWorkflow
@@ -43,6 +42,7 @@ from aive.project.hashing import canonical_model_hash
 from aive.renderer.base import RenderResult
 from aive.rendering.application import RevisionRenderApplication
 from aive.storage import LocalStorage
+from tests.provider_fakes import FixtureFirstCutDirectorProvider
 
 
 NOW = datetime(2026, 9, 27, 0, 0, tzinfo=timezone.utc)
@@ -149,7 +149,9 @@ class RepairingDirectorProvider:
             moment_ids=("invented_moment",),
             summary="Needs repair",
             explanation="Needs repair",
-            music_strategy=MusicStrategy(mode="music_bed"),
+            music_strategy=MusicStrategy(
+                mode="music_bed", asset_id="invented_music_asset"
+            ),
         )
 
     async def repair_first_cut(self, context, decision, review):
@@ -165,12 +167,11 @@ class UnrepairableDirectorProvider(RepairingDirectorProvider):
         return decision
 
 
-class RenderAutoFixDirectorProvider(OfflineDirectorProvider):
+class RenderAutoFixDirectorProvider(FixtureFirstCutDirectorProvider):
     name = "render-autofix-director"
     version = "1"
 
     def __init__(self) -> None:
-        super().__init__()
         self.render_repairs = 0
 
     async def create_first_cut(self, context):
@@ -330,7 +331,7 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
         ),
     )
     harness = VideoAgentHarness(
-        provider=provider or OfflineDirectorProvider(),
+        provider=provider or FixtureFirstCutDirectorProvider(),
         render_review_engine=RenderReviewEngine(
             inspector=inspector or FakeInspector(),
             provider=render_reviewer,

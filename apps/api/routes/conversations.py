@@ -15,6 +15,7 @@ from aive.contracts.conversation import (
 )
 from aive.db.analysis_repository import SqlAlchemyMediaAnalysisRepository
 from aive.db.conversation_repository import SqlAlchemyConversationRepository
+from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.session import get_session_factory
 from aive.jobs import JobRunner
 from aive.rendering import RevisionRenderApplication
@@ -37,6 +38,7 @@ def get_conversation_application(
         analysis=SqlAlchemyMediaAnalysisRepository(sessions),
         rendering=get_revision_render_application(),
         harness=harness,
+        assets=SqlAlchemyMediaAssetRepository(sessions),
     )
 
 

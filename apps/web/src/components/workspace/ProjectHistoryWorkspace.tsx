@@ -6,10 +6,13 @@ import {
   Clock3,
   Download,
   Film,
+  Flag,
   LoaderCircle,
+  MessageSquare,
   Play,
   RotateCcw,
   Sparkles,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -31,6 +34,8 @@ import type {
   AssetProcessingStatus,
   CreateRenderRequest,
   DirectorRun,
+  FrameRange,
+  PreviewAnnotation,
   ProjectRevision,
   RenderArtifact,
   RestoreRevisionRequest,
@@ -140,6 +145,18 @@ export function ProjectHistoryWorkspace({
     revisionId: string;
     frame: number;
   } | null>(null);
+  const [previewMode, setPreviewMode] = useState<"preview" | "annotate">(
+    "preview",
+  );
+  const [annotationStartFrame, setAnnotationStartFrame] = useState<number | null>(
+    null,
+  );
+  const [annotationDraftRange, setAnnotationDraftRange] =
+    useState<FrameRange | null>(null);
+  const [annotationComment, setAnnotationComment] = useState("");
+  const [previewAnnotations, setPreviewAnnotations] = useState<
+    PreviewAnnotation[]
+  >([]);
   const [error, setError] = useState<string | null>(null);
   const hasActiveMedia = assetStatuses.some(
     (asset) =>
@@ -320,6 +337,16 @@ export function ProjectHistoryWorkspace({
     previewPlayhead.revisionId === current.document.revision_id
       ? previewPlayhead.frame
       : null;
+  const currentPreviewAnnotations = previewAnnotations.filter(
+    (annotation) =>
+      annotation.revision_id === current?.document.revision_id,
+  );
+  const canAnnotateCurrentPreview = Boolean(
+    readyPreview &&
+      current &&
+      selected?.document.revision_id === current.document.revision_id &&
+      currentPreviewPlayhead !== null,
+  );
   const capturePreviewPlayhead = (currentTime: number) => {
     if (!selected || !readyPreview) return;
     const frame = previewFrameAtTime(selected, readyPreview, currentTime);
@@ -332,6 +359,57 @@ export function ProjectHistoryWorkspace({
             frame,
           },
     );
+  };
+  const clearAnnotationDraft = () => {
+    setAnnotationStartFrame(null);
+    setAnnotationDraftRange(null);
+    setAnnotationComment("");
+  };
+  const markCurrentFrame = () => {
+    if (currentPreviewPlayhead === null) return;
+    setAnnotationStartFrame(null);
+    setAnnotationDraftRange({
+      start_frame: currentPreviewPlayhead,
+      duration_frames: 1,
+    });
+  };
+  const toggleAnnotationRange = () => {
+    if (currentPreviewPlayhead === null) return;
+    if (annotationStartFrame === null) {
+      setAnnotationStartFrame(currentPreviewPlayhead);
+      setAnnotationDraftRange(null);
+      return;
+    }
+    const start = Math.min(annotationStartFrame, currentPreviewPlayhead);
+    const end = Math.max(annotationStartFrame, currentPreviewPlayhead) + 1;
+    setAnnotationDraftRange({
+      start_frame: start,
+      duration_frames: end - start,
+    });
+    setAnnotationStartFrame(null);
+  };
+  const attachPreviewAnnotation = () => {
+    const comment = annotationComment.trim();
+    if (
+      !current ||
+      !readyPreview ||
+      !annotationDraftRange ||
+      !comment ||
+      currentPreviewAnnotations.length >= 8
+    ) {
+      return;
+    }
+    setPreviewAnnotations((annotations) => [
+      ...annotations,
+      {
+        annotation_id: newStableId("preview_annotation"),
+        revision_id: current.document.revision_id,
+        artifact_id: readyPreview.artifact_id,
+        output_range: annotationDraftRange,
+        comment,
+      },
+    ]);
+    clearAnnotationDraft();
   };
   const firstReadyAsset = selected?.document.assets?.find((asset) =>
     assetStatuses.some(
@@ -443,6 +521,8 @@ export function ProjectHistoryWorkspace({
             : [...history, restored],
         );
         setSelectedId(restored.document.revision_id);
+        clearAnnotationDraft();
+        setPreviewAnnotations([]);
       }
       try {
         await refresh();
@@ -568,6 +648,15 @@ export function ProjectHistoryWorkspace({
             projectId={projectId}
             currentRevisionId={current?.document.revision_id ?? null}
             playheadFrame={currentPreviewPlayhead}
+            previewAnnotations={currentPreviewAnnotations}
+            onRemovePreviewAnnotation={(annotationId) =>
+              setPreviewAnnotations((annotations) =>
+                annotations.filter(
+                  (annotation) => annotation.annotation_id !== annotationId,
+                ),
+              )
+            }
+            onPreviewAnnotationsConsumed={() => setPreviewAnnotations([])}
             onRevisionChanged={refresh}
           />
           <div className="border-b border-line px-5 py-4">
@@ -591,6 +680,8 @@ export function ProjectHistoryWorkspace({
                     setRangeDuration(
                       Math.min(90, revision.document.timeline.duration_frames),
                     );
+                    clearAnnotationDraft();
+                    setPreviewAnnotations([]);
                   }}
                   className={`mb-1 w-full rounded-[var(--radius-control)] border px-3.5 py-3 text-left transition-colors ${
                     isSelected
@@ -659,6 +750,37 @@ export function ProjectHistoryWorkspace({
               </div>
 
               <div className="mt-7 overflow-hidden rounded-[var(--radius-card)] border border-line bg-[#111318]">
+                <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5 text-white">
+                  <div className="flex rounded-lg bg-white/5 p-1 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode("preview")}
+                      className={`rounded-md px-3 py-1.5 transition ${
+                        previewMode === "preview"
+                          ? "bg-white font-semibold text-black"
+                          : "text-white/60 hover:text-white"
+                      }`}
+                    >
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode("annotate")}
+                      className={`rounded-md px-3 py-1.5 transition ${
+                        previewMode === "annotate"
+                          ? "bg-white font-semibold text-black"
+                          : "text-white/60 hover:text-white"
+                      }`}
+                    >
+                      Preview edit
+                    </button>
+                  </div>
+                  {previewMode === "annotate" && currentPreviewPlayhead !== null && (
+                    <span className="font-mono text-[11px] text-white/55">
+                      Frame {currentPreviewPlayhead}
+                    </span>
+                  )}
+                </div>
                 <div className="flex min-h-72 items-center justify-center bg-black/40 p-4">
                   {readyPreview ? (
                     <video
@@ -751,6 +873,112 @@ export function ProjectHistoryWorkspace({
                       </button>
                     </div>
                   </div>
+
+                  {previewMode === "annotate" && (
+                    <div className="mt-4 rounded-xl border border-white/15 bg-white/5 p-3">
+                      {!readyPreview ? (
+                        <p className="text-xs leading-5 text-white/60">
+                          Render a Revision preview before adding an annotation.
+                        </p>
+                      ) : selected.document.revision_id !==
+                        current?.document.revision_id ? (
+                        <p className="text-xs leading-5 text-white/60">
+                          Preview annotations can only target the current Revision. Restore
+                          this version first if you want to edit it.
+                        </p>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={markCurrentFrame}
+                              disabled={currentPreviewPlayhead === null}
+                              className="flex h-8 items-center gap-1.5 rounded-md bg-white px-3 text-xs font-semibold text-black disabled:cursor-not-allowed disabled:opacity-35"
+                            >
+                              <Flag size={13} /> Mark this frame
+                            </button>
+                            <button
+                              type="button"
+                              onClick={toggleAnnotationRange}
+                              disabled={currentPreviewPlayhead === null}
+                              className="flex h-8 items-center gap-1.5 rounded-md border border-white/20 px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-35"
+                            >
+                              {annotationStartFrame === null
+                                ? "Start range here"
+                                : "Finish range here"}
+                            </button>
+                            {annotationStartFrame !== null && (
+                              <span className="font-mono text-[11px] text-amber-300">
+                                Started at frame {annotationStartFrame}
+                              </span>
+                            )}
+                          </div>
+
+                          {annotationDraftRange && (
+                            <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="flex items-center gap-1.5 text-xs font-medium">
+                                  <MessageSquare size={13} />
+                                  {annotationDraftRange.duration_frames === 1
+                                    ? `Frame ${annotationDraftRange.start_frame}`
+                                    : `Frames ${annotationDraftRange.start_frame}–${
+                                        annotationDraftRange.start_frame +
+                                        annotationDraftRange.duration_frames -
+                                        1
+                                      }`}
+                                </p>
+                                <button
+                                  type="button"
+                                  aria-label="Cancel annotation"
+                                  onClick={clearAnnotationDraft}
+                                  className="rounded p-1 text-white/50 hover:bg-white/10 hover:text-white"
+                                >
+                                  <X size={13} />
+                                </button>
+                              </div>
+                              <textarea
+                                aria-label="Preview annotation comment"
+                                value={annotationComment}
+                                onChange={(event) =>
+                                  setAnnotationComment(event.target.value)
+                                }
+                                maxLength={2000}
+                                rows={2}
+                                placeholder="What should change here?"
+                                className="mt-2 w-full resize-none rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs leading-5 text-white outline-none placeholder:text-white/35 focus:border-white/40"
+                              />
+                              <div className="mt-2 flex items-center justify-between gap-3">
+                                <span className="text-[10px] text-white/40">
+                                  The exact Revision, preview, and frame range will be sent
+                                  with your message.
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={attachPreviewAnnotation}
+                                  disabled={
+                                    !annotationComment.trim() ||
+                                    !canAnnotateCurrentPreview ||
+                                    currentPreviewAnnotations.length >= 8
+                                  }
+                                  className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-35"
+                                >
+                                  Add to prompt
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          <p className="mt-2 text-[11px] leading-4 text-white/45">
+                            {currentPreviewAnnotations.length > 0
+                              ? `${currentPreviewAnnotations.length} annotation${
+                                  currentPreviewAnnotations.length === 1 ? "" : "s"
+                                } attached to the AI editor.`
+                              : "Pause or scrub the video, mark a frame or range, then add a comment."}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   <div className="mt-4 flex flex-wrap items-end gap-2 border-t border-white/10 pt-4">
                     <label className="text-[11px] text-white/60">

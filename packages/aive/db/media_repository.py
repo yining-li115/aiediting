@@ -286,7 +286,7 @@ class SqlAlchemyMediaAssetRepository:
 
 
 def _record_from_row(row: Asset) -> MediaAssetRecord:
-    if row.kind not in {"video", "photo"}:
+    if row.kind not in {"video", "photo", "audio"}:
         raise AssetIdentityConflict(
             f"asset {row.id!r} has unsupported registered kind {row.kind!r}"
         )

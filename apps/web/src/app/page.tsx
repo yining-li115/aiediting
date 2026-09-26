@@ -1,6 +1,6 @@
 "use client";
 
-import { Film, Layers, Video } from "lucide-react";
+import { Film, Layers, Music2, Video } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
 
@@ -70,6 +70,7 @@ export default function WorkspacePage() {
   const [materials, setMaterials] = useState<UploadedFile[]>([]);
   const [styles, setStyles] = useState<UploadedFile[]>([]);
   const [remake, setRemake] = useState<UploadedFile[]>([]);
+  const [music, setMusic] = useState<UploadedFile[]>([]);
   const [creating, setCreating] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +121,8 @@ export default function WorkspacePage() {
               task_mode: remake.length ? "reference_remake" : "autonomous",
               target_duration_frames: settings.length * 30,
               prompt: prompt.trim() || null,
+              caption_policy: settings.autoCaptions ? "auto" : "none",
+              music_policy: settings.backgroundMusic ? "auto" : "none",
               style_tags: [settings.vibe],
             },
             output: {
@@ -164,6 +167,10 @@ export default function WorkspacePage() {
             "reference",
             "remake_reference",
           ],
+        })),
+        ...music.map((uploaded) => ({
+          uploaded,
+          roles: ["music"] as ["music"],
         })),
       ];
       if (media.length) {
@@ -232,7 +239,7 @@ export default function WorkspacePage() {
       setCreating(false);
       setUploadProgress(null);
     }
-  }, [materials, prompt, remake, router, settings, styles]);
+  }, [materials, music, prompt, remake, router, settings, styles]);
 
   return (
     <div
@@ -267,7 +274,7 @@ export default function WorkspacePage() {
           {/* One card per row on a phone, two on a tablet, three only once
               there is room for three comfortable ones rather than three
               narrow ones. */}
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 2xl:grid-cols-4">
             <UploadCard
               icon={<Video size={13} className="text-[#3b82f6]" />}
               iconClass="bg-[#e7f0fe]"
@@ -308,6 +315,21 @@ export default function WorkspacePage() {
               files={remake}
               onAdd={add(setRemake, true)}
               onRemove={remove(setRemake)}
+              variant="single"
+            />
+
+            <UploadCard
+              icon={<Music2 size={13} className="text-[#16a34a]" />}
+              iconClass="bg-[#e8f7ec]"
+              title="Licensed Music"
+              optional
+              description="Upload one owned or licensed track for the Director to mix under the cut."
+              dropzoneTitle="Add a music track"
+              {...UPLOAD_LIMITS.music}
+              multiple={false}
+              files={music}
+              onAdd={add(setMusic, true)}
+              onRemove={remove(setMusic)}
               variant="single"
             />
           </div>

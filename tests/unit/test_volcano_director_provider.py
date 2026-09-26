@@ -12,7 +12,11 @@ from aive.agent.provider import (
     VolcanoDirectorProvider,
 )
 from aive.agent.harness import VideoAgentHarness
-from aive.contracts.conversation import AgentTurnContext, WorkspaceSelection
+from aive.contracts.conversation import (
+    AgentTurnContext,
+    PreviewAnnotation,
+    WorkspaceSelection,
+)
 from aive.contracts.director import (
     AgentAssetContext,
     AgentRunContext,
@@ -216,6 +220,83 @@ async def test_google_director_uses_the_shared_structured_tool_schema(
     assert decision.call.tool == "read_project"
     assert requests[0]["model"] == "gemini-test-snapshot"
     assert requests[0]["response_format"]["type"] == "json_schema"
+
+
+async def test_preview_annotation_grounds_the_exact_timeline_range(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "kind": "tool_call",
+                                    "call": {
+                                        "tool": "read_project",
+                                        "call_id": "call_read_annotated_project",
+                                    },
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-gemini-director",
+            vendor="google",
+            model_id="gemini-test-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    context = _turn_context().model_copy(
+        update={
+            "instruction": "按我的标记调整。",
+            "workspace": WorkspaceSelection(
+                revision_id="revision_assets",
+                preview_annotations=(
+                    PreviewAnnotation(
+                        annotation_id="annotation_second_shot",
+                        revision_id="revision_assets",
+                        artifact_id="artifact_preview",
+                        output_range=FrameRange(
+                            start_frame=35,
+                            duration_frames=10,
+                        ),
+                        comment="这里节奏太慢，缩短到一半。",
+                    ),
+                ),
+            ),
+        }
+    )
+
+    decision = await provider.next_edit_step(context, ())
+
+    assert decision.kind == "tool_call"
+    serialized = json.dumps(requests[0], ensure_ascii=False)
+    assert "annotation_second_shot" in serialized
+    assert "这里节奏太慢" in serialized
+    assert "clip_visual_2" in serialized
+    assert "clip_audio_2" in serialized
 
 
 async def test_google_director_clarifies_ungrounded_instruction_before_tools(
@@ -528,9 +609,14 @@ async def test_volcano_provider_emits_structural_patch_through_real_tool_schema(
     ]
     serialized = json.dumps(requests, ensure_ascii=False)
     assert '\\"playhead_frame\\":45' in serialized
+    assert '\\"playhead_visual_clip_id\\":\\"clip_visual_2\\"' in serialized
     assert "do not use a keyword-to-operation lookup" in serialized
     assert "MUST include replace_visual_source plus set_visual_output" in serialized
     assert "source_duration_ticks * fps.num * rate.den" in serialized
+    assert "For Replace, call search_moments then inspect_media" in serialized
+    assert "Only center Reframe is currently renderable" in serialized
+    assert "For Constant Speed" in serialized
+    assert "For Gain/Fade" in serialized
 
 
 def test_volcano_provider_rejects_data_sharing_endpoint_by_default() -> None:

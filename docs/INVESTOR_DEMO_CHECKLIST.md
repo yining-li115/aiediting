@@ -22,7 +22,7 @@
 - [x] Project 创建时自动生成 initial Revision，浏览器可直接进入项目。
 - [x] 前后端 Contract 类型由后端 Schema 生成。
 - [x] Alembic 可以从空数据库升级到当前 Schema，模型与迁移无漂移。
-- [ ] 为当前 Continuous Editing 工作创建一次无 AI 签名的 checkpoint commit。
+- [x] 已创建无 AI 签名的 Continuous Editing checkpoint commit `5aaef04`。
 
 ## 1. 素材上传与理解
 
@@ -51,8 +51,8 @@
 - [x] Review 通过后才原子接受 Candidate。
 - [x] 浏览器显示 Director 说明、Reviewer 结果、进度和实际预览。
 - [ ] 使用真实火山 Director + Reviewer 完成一次端到端质量验收。
-- [ ] 首版 Caption Strategy 真正生成并渲染字幕，而不只记录策略。
-- [ ] 首版 Music Strategy 选择有授权的音乐并真正混音渲染。
+- [x] 首版 Caption Strategy 将所选 Moment 的 ASR 写入 `caption.clean@1.0.0` CaptionTrack，并在 preview/export 路径实际渲染。
+- [x] 首版 Music Strategy 必须选择项目内明确授权的 music Asset，并实际生成 Gain/Fade/Ducking 音轨与混音预览。
 - [ ] 建立第一版剪辑质量评测：开场、连贯性、节奏、重复镜头、音画匹配。
 
 ## 3. Continuous Editing Agent
@@ -66,21 +66,25 @@
 - [x] `propose_patch` 只能产生提案，最终仍经过 ProjectService。
 - [x] Agent 根据实际提交操作解释“改了什么”，并关联结果 Revision。
 - [x] 左侧对话面板已接入 Job、Revision、preview 和 history 刷新。
-- [x] 离线 Provider 可真实完成全局或选中音频轨道的降音量/静音。
+- [x] 生产运行时已删除离线 Director 与关键词/规则回退；模型未配置或输出非法时失败并保留当前 Revision。
 - [x] Preview Player 将当前播放帧写入 WorkspaceSelection；完整 preview 和 range preview 都映射为 Revision 的绝对帧，历史 Revision/source proxy 不会污染当前 Turn。
+- [x] Preview Annotation v1 已接通：用户可在 `Preview edit` 标记当前帧或区间、写评论并引用到左侧对话；引用绑定 ready preview Artifact 与精确 Revision，持久化到 Message/AgentTurnContext，并确定性解析为重叠 timeline IDs。
 - [ ] 右侧工作区把真实 clip/track/section 选区传入 WorkspaceSelection。
 - [ ] 完整 Workspace 继续传入 visible range、选区和 comparison Revision。
 - [x] 正式 Director 的闭合 schema、Tool Registry 和 ProjectService/Revision/Preview 路径已支持 clip-boundary Trim、whole-clip Move/Delete；Gemini 与火山共用同一 Provider port，不使用自然语言关键词枚举。
 - [x] 真实 Gemini 3.1 Flash Lite 已完成一次 whole-clip Delete：playhead 定位 -> read_project -> typed Patch -> ProjectService -> 新 Revision -> preview enqueue。
-- [x] 真实 Gemini 多轮 Golden Run 已验收 Trim -> Move -> Delete：同一 Conversation 连续生成三代 child Revision，源音频同步，6s/5s/5s/3s 四份 revision-bound FFmpeg 预览均保留且包含音视频流。
+- [x] 真实 Gemini 多轮 Golden Run 已验收 Trim -> Move -> Delete -> Replace -> Crop/Center Reframe -> Constant Speed -> Gain/Fade：同一 Conversation 连续生成七代 child Revision，8 份 revision-bound FFmpeg 预览均保留且包含音视频流。
 - [x] `propose_patch` 在提交前执行无写入 ProjectService + renderer dry-run；非法 scope、stale ID、gap/overlap 等错误回到六步 Tool Loop 受限修正，失败 proposal 不推进 head。
-- [ ] 真实模型 Golden Run 通过后移除运行时离线关键词策略；生产 Director 未配置时应失败关闭，测试改用显式 scripted fixtures。
-- [ ] 自然语言替换镜头，并通过 Moment 搜索选择替代素材。
-- [ ] 自然语言 Crop/Reframe 端到端可用。
-- [ ] 自然语言 Speed/Retime 端到端可用。
-- [ ] 自然语言字幕生成、修改、样式与时序端到端可用。
-- [ ] 自然语言音乐选择、音量、淡入淡出和 ducking 端到端可用。
-- [ ] 自然语言转场、Effect、Graphic/Motion 端到端可用。
+- [x] 真实模型 Golden Run 通过后已移除运行时离线关键词策略。
+- [x] 生产 Director 未配置时失败关闭，模型问题通过 AgentTurn/Job 错误显示到前端；测试使用显式 scripted fixtures。
+- [x] 自然语言替换镜头端到端可用；替代素材必须先经过 `search_moments` 和 `inspect_media`，并同步替换来源原声。
+- [x] 自然语言 Crop/Center Reframe 端到端可用；未支持的 face/saliency/manual Reframe 继续失败关闭。
+- [x] 自然语言 Constant Speed 端到端可用；源范围、输出时长、来源音频和 timeline ripple 保持精确一致。
+- [x] 自然语言来源音频 Gain/Fade 端到端可用，并生成新的 Revision-bound Preview。
+- [x] Continuous Editing 的正式模型 schema/Tool Registry 已开放字幕生成、文字、样式、时序操作，并通过 scripted AgentTurn -> Revision -> Preview 端到端测试；真实模型 Golden Run 待完成。
+- [x] Continuous Editing 可从冻结 runtime Assets 选择已授权音乐，调整音量、淡入淡出和 `speech` ducking，并通过 scripted 端到端测试；真实模型 Golden Run 待完成。
+- [x] 自然语言 Graphic 可通过 Registry 搜索已发布组件并生成 typed Patch；Agent 找不到组件时可在 Sandbox 生成候选，但不能自行发布。
+- [ ] 自然语言转场、Effect、Visual Motion 端到端可用。
 - [x] 无 playhead/选区 grounding 的模糊指令先经过模型语义澄清门；Golden Run 中“把这个镜头调整一下”只产生追问，不产生 Patch、Preview 或新 Revision。
 - [ ] 高影响修改进入 Candidate -> Preview -> Reviewer/用户确认流程。
 - [ ] 局部编辑只重渲染受影响范围并保留必要的转场/音频 handles。
@@ -107,17 +111,23 @@
 - [x] FFmpeg Renderer 直接读取指定 Revision 的 ProjectDoc。
 - [x] 视频/照片硬切、恒定速度、Crop、中心 Reframe 可渲染。
 - [x] 显式音频片段、Gain、Fade、Delay 和 Mix 可渲染。
+- [x] `caption.clean@1.0.0` 字幕按精确帧范围渲染；中英文、字体、字号、描边、背景、换行和底部 Safe Area 参数可控。
+- [x] 授权音频上传会生成 AAC proxy 与 waveform thumbnail；音乐可与原声/旁白通过 FFmpeg sidechain ducking 混音。
 - [x] 完整 Preview、Range Preview 和 HQ Export 绑定精确 Revision。
 - [x] 浏览器可播放 preview 并下载 ready export。
 - [x] 新 Revision 不会覆盖或错误标记旧 Revision Artifact。
 - [ ] 接入 FFmpeg `xfade` 第一批稳定转场并完成回归测试。
 - [ ] 接入第一批 MIT Remotion Templates，但继续共用 ProjectDoc Timeline。
+- [x] Remotion Component Manifest、Candidate、受限 Sandbox、真实 PNG 验证、显式 Approval 与不可变 Registry 基础已完成；候选源码的规范 Artifact 进入对象存储且绝不写入产品源码树，Agent Trace 保留可审计输入。
+- [x] Agent 已接入 `search_components` / `create_component_candidate`；候选结果持久化，发布必须经过独立的用户/Reviewer Approval API，模型没有 publish 工具。
+- [x] Hybrid Remotion RendererProvider 从 Registry 解析精确 Caption/Graphic 版本并按指定 Revision 生成 preview/range preview/export；ProjectService 在提交前校验发布状态、props 与 runtime。
 - [ ] 完成 GL Transitions 技术验证并决定是否进入支持矩阵。
 - [ ] Remotion Player 在右侧工作区读取同一 ProjectDoc timing。
-- [ ] 字幕、标题卡、品牌组件和 Motion Graphics 可预览并导出。
-- [ ] 字体、Safe Area、竖屏文字换行和中英文排版可控。
+- [x] Registry-backed 动态字幕、标题卡和品牌 Graphic 组件可预览并导出。
+- [ ] Visual Motion、转场与像素级 Effect 的媒体输入 ABI、预览和导出。
+- [x] 静态 `caption.clean` 的字体、Safe Area、竖屏文字换行和中英文排版可控；逐字高亮与动态字效仍待 Remotion。
 - [ ] 音乐、旁白、原声与 ducking 的 preview/export 一致。
-- [ ] 为转场、字幕、Graphic、Effect 建立 preview/export 一致性 fixtures。
+- [ ] 为转场、字幕、Graphic、Effect 建立完整 preview/export 一致性 fixtures；当前已有真实 Graphic 合成回归。
 
 ## 6. Reference Remake 模式
 
@@ -173,16 +183,16 @@
 - [ ] 演练模型超时、素材分析失败和渲染失败，确认旧版本仍可播放。
 - [ ] 连续三次完成“创建 -> 上传 -> 首版 -> 对话修改 -> 手动修改 -> 锁定 -> Agent 再编辑 -> 对比/恢复 -> 导出”。
 - [ ] 完成投资人讲解脚本、操作节奏和每一步预期画面。
-- [ ] 准备诚实的离线 Provider/已缓存 Artifact 应急方案并明确标识。
+- [ ] 准备只读的已缓存 Artifact 应急展示并明确标识；不得离线生成或伪装为本次模型结果。
 - [ ] 在正式演示机器、网络和投屏环境完成最终彩排。
 
 ## 当前推荐实施顺序
 
 当前产品决策是先完成 Preview-only 全链路，验收效果后再接 Workspace：
 
-1. **保存当前 Continuous Editing checkpoint**：提交已通过测试的 Conversation、Context、Tool Loop、Patch、Revision、Preview 和左侧对话面板。
-2. **Preview-only 高频编辑包**：先完成现有 FFmpeg 能真实渲染的 Trim、删除/移动、替换、Crop、恒定 Speed、Gain 和 Fade。
-3. **Preview-only 表现层**：完成字幕、授权音乐、Ducking、FFmpeg `xfade` 与第一批 Remotion 模板，使首版和后续修改都能实际渲染。
+1. **已完成：保存 Continuous Editing checkpoint**：提交已通过测试的 Conversation、Context、Tool Loop、Patch、Revision、Preview 和左侧对话面板。
+2. **已完成：Preview-only 高频编辑包**：Trim、删除/移动、替换、Crop、中心 Reframe、恒定 Speed、Gain 和 Fade 已通过真实模型和 FFmpeg Golden Run。
+3. **进行中：Preview-only 表现层**：字幕、授权音乐和 Ducking 基线已完成；Remotion Caption/Graphic 的候选、沙箱、Approval、Registry、Agent 工具和 Revision-bound Renderer 闭环已完成；Preview Annotation v1 已完成，下一步是第一批真实组件/转场与产品级前端打磨。
 4. **Preview 产品体验**：左侧对话和右侧播放器形成无跳变流程，显示 Agent/Render 阶段、实际改动、历史、Restore、失败恢复和 HQ Export。
 5. **真实模型 Golden Run**：先用 Gemini 调通与评测，随后对素材理解、Director、Reviewer 和多轮 Continuous Editing 完成火山等生产候选的质量调参与 Role 选型。
 6. **Reference Remake Preview-only**：复用同一 ProjectDoc、Agent Harness、Patch、Reviewer 和渲染链路完成参考复刻全流程。
@@ -191,6 +201,7 @@
 
 ### 下一项
 
-- [ ] 提交当前 Continuous Editing checkpoint，然后实现 Preview-only
-  高频编辑包中的第一组：`Trim + Delete/Move + Replace + Crop + Constant Speed`，
-  每项都必须完成 `自然语言 -> typed Patch -> Revision -> 自动渲染 -> Agent 解释`。
+- [x] Preview-only 第一组：静态字幕渲染、授权音乐上传/混音与 speech ducking。
+- [x] Remotion 组件基础：候选源码在临时沙箱验证并存入对象存储，不进入产品源码；发布需要显式 Approval。
+- [x] 接入 Agent 组件搜索/创建工具和 Hybrid Remotion RendererProvider，完成 Graphic 的真实 Revision-bound render 回归。
+- [ ] 在前端加入候选 PNG 审核/发布入口，并完成第一批投资人演示用动态字幕、标题卡和品牌组件。

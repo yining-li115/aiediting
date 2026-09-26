@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from aive.providers import Role, get_provider, set_cost_sink
-from aive.providers.base import CostRecord
+from aive.providers import Role, available_adapters, get_provider, set_cost_sink
+from aive.providers.base import BaseProvider, CostRecord
 from aive.specs.segment import RawSegment
 
 
@@ -81,6 +81,53 @@ def test_gemini_director_is_selected_through_the_existing_provider_port() -> Non
     assert isinstance(provider, OpenAICompatibleDirectorProvider)
     assert provider.name == "gemini-3.8-flash"
     assert provider.model == "gemini-3.8-flash"
+
+
+def test_runtime_director_never_resolves_to_an_offline_mock(monkeypatch) -> None:
+    from aive.agent.provider import OpenAICompatibleDirectorProvider
+
+    monkeypatch.delenv("AIVE_ROLE_DIRECTOR_MODEL", raising=False)
+    monkeypatch.delenv("AIVE_ROLE_DIRECTOR_FALLBACK_MODELS", raising=False)
+
+    provider = get_provider(Role.DIRECTOR)
+
+    assert isinstance(provider, OpenAICompatibleDirectorProvider)
+    assert provider.name != "mock"
+    assert "mock" not in available_adapters(Role.DIRECTOR)
+
+
+def test_mock_cannot_be_selected_explicitly_for_director() -> None:
+    with pytest.raises(ValueError, match="not declared for role 'director'"):
+        get_provider(Role.DIRECTOR, "mock")
+
+
+def test_unconfigured_runtime_director_fails_with_an_actionable_error(
+    monkeypatch,
+) -> None:
+    from aive.providers.openai_compatible import ProviderConfigError
+
+    monkeypatch.delenv("AIVE_ROLE_DIRECTOR_MODEL", raising=False)
+    monkeypatch.delenv("AIVE_GOOGLE_API_KEY", raising=False)
+    provider = get_provider(Role.DIRECTOR)
+
+    with pytest.raises(ProviderConfigError, match="AIVE_GOOGLE_API_KEY"):
+        _ = provider.client.api_key
+
+
+async def test_provider_failure_preserves_the_model_problem_for_the_ui() -> None:
+    class InvalidOutputProvider(BaseProvider):
+        role = Role.DIRECTOR
+        name = "invalid-output-model"
+        max_retries = 1
+
+        async def invoke(self):
+            async def fail():
+                raise ValueError("operations.0.clip_id is required")
+
+            return await self._guarded(fail)
+
+    with pytest.raises(RuntimeError, match="operations.0.clip_id is required"):
+        await InvalidOutputProvider().invoke()
 
 
 # --- provenance ------------------------------------------------------------

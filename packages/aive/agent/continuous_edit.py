@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -9,11 +10,12 @@ from ..contracts.conversation import (
     AgentToolStep,
     AgentToolResult,
     AgentTurnContext,
+    CreateComponentCandidateCall,
     PatchProposal,
     ProposePatchCall,
 )
 from .provider import DirectorProvider
-from .tools import AgentToolPermissionError, AgentToolRegistry
+from .tools import AgentToolPermissionError, AgentToolRegistry, ComponentAgentTools
 
 
 class AgentToolStepLimitExceeded(RuntimeError):
@@ -34,8 +36,14 @@ class ContinuousEditOutcome:
 class ContinuousEditPipeline:
     """Let the provider choose approved tools while enforcing a hard step cap."""
 
-    def __init__(self, provider: DirectorProvider) -> None:
+    def __init__(
+        self,
+        provider: DirectorProvider,
+        *,
+        component_tools: ComponentAgentTools | None = None,
+    ) -> None:
         self._provider = provider
+        self._component_tools = component_tools
 
     async def run(
         self,
@@ -58,6 +66,8 @@ class ContinuousEditPipeline:
         registry = AgentToolRegistry(
             context,
             proposal_validator=proposal_validator,
+            prior_steps=tuple(steps),
+            component_tools=self._component_tools,
         )
         seen_call_ids = {step.call.call_id for step in steps}
         while len(steps) < context.max_tool_steps:
@@ -76,9 +86,12 @@ class ContinuousEditPipeline:
                     f"provider reused tool call ID {decision.call.call_id!r}"
                 )
             try:
-                result = registry.execute(decision.call)
+                result = await asyncio.to_thread(registry.execute, decision.call)
             except AgentToolPermissionError as exc:
-                if not isinstance(decision.call, ProposePatchCall):
+                if not isinstance(
+                    decision.call,
+                    (ProposePatchCall, CreateComponentCandidateCall),
+                ):
                     raise
                 # A syntactically valid proposal can still violate Patch scope,
                 # source-audio pairing, or ripple policy.  Persist the rejected

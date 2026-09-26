@@ -26,6 +26,7 @@ from aive.storage import get_storage
 
 from .project_revisions import get_project_revision_application
 from .renders import get_revision_render_application
+from ..component_dependencies import get_component_application
 
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["project Director"])
@@ -34,6 +35,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["project Director"])
 def get_video_agent_harness() -> VideoAgentHarness:
     return VideoAgentHarness(
         provider=get_provider(Role.DIRECTOR),
+        component_tools=get_component_application(),
         render_review_engine=RenderReviewEngine(
             provider=get_provider(Role.REVIEWER),
         ),

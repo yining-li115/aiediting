@@ -1,0 +1,27 @@
+{
+  "name": "aive-remotion-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "install-browser": "node scripts/install-browser.mjs",
+    "validate-candidate": "node scripts/validate-candidate.mjs"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.529",
+    "@remotion/captions": "4.0.529",
+    "@remotion/fonts": "4.0.529",
+    "@remotion/layout-utils": "4.0.529",
+    "@remotion/lottie": "4.0.529",
+    "@remotion/paths": "4.0.529",
+    "@remotion/renderer": "4.0.529",
+    "@remotion/shapes": "4.0.529",
+    "@remotion/transitions": "4.0.529",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.529"
+  }
+}

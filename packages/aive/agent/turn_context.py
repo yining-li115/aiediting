@@ -8,18 +8,25 @@ from ..contracts.conversation import (
     CreateAgentTurnRequest,
 )
 from ..contracts.moments import MomentEvidence
+from ..contracts.director import AgentAssetContext
+from ..media.repository import AssetProcessingRecord
 from ..contracts.project_doc import ProjectDoc
 from ..contracts.revision import ProjectRevision
 
 
 DEFAULT_MAX_TOOL_STEPS = 6
 CONVERSATION_CONTEXT_MESSAGES = 20
-CONTINUOUS_EDIT_TOOLS = (
+BASE_CONTINUOUS_EDIT_TOOLS = (
     "read_project",
     "search_moments",
     "inspect_media",
     "propose_patch",
 )
+COMPONENT_EDIT_TOOLS = (
+    "search_components",
+    "create_component_candidate",
+)
+CONTINUOUS_EDIT_TOOLS = BASE_CONTINUOUS_EDIT_TOOLS + COMPONENT_EDIT_TOOLS
 
 
 class AgentTurnContextError(ValueError):
@@ -29,6 +36,13 @@ class AgentTurnContextError(ValueError):
 class AgentTurnContextBuilder:
     """Snapshot project, evidence, recent messages, and transient UI selection."""
 
+    def __init__(
+        self,
+        *,
+        allowed_tools: tuple[str, ...] = BASE_CONTINUOUS_EDIT_TOOLS,
+    ) -> None:
+        self._allowed_tools = allowed_tools
+
     def build(
         self,
         *,
@@ -37,6 +51,7 @@ class AgentTurnContextBuilder:
         revision: ProjectRevision,
         moments: tuple[MomentEvidence, ...],
         history: tuple[ConversationMessage, ...],
+        asset_statuses: tuple[AssetProcessingRecord, ...] = (),
     ) -> AgentTurnContext:
         document = revision.document
         if document.project_id != request.project_id:
@@ -64,6 +79,11 @@ class AgentTurnContextBuilder:
             raise AgentTurnContextError(
                 "workspace visible range is outside the current timeline"
             )
+        for annotation in request.workspace.preview_annotations:
+            if annotation.output_range.end_frame > duration:
+                raise AgentTurnContextError(
+                    "preview annotation range is outside the current timeline"
+                )
 
         scoped_moments = tuple(
             sorted(
@@ -85,6 +105,27 @@ class AgentTurnContextBuilder:
                     "Agent turn history belongs to another conversation"
                 )
         recent = history[-CONVERSATION_CONTEXT_MESSAGES:]
+        refs = {asset.asset_id: asset for asset in document.assets}
+        runtime_assets = tuple(
+            AgentAssetContext(
+                asset_id=status.asset_id,
+                kind=refs[status.asset_id].kind,
+                roles=refs[status.asset_id].roles,
+                label=refs[status.asset_id].label or status.original_name,
+                duration_seconds=status.duration_seconds,
+                width=status.width,
+                height=status.height,
+                fps=status.fps,
+                has_audio=status.has_audio,
+                analysis_readiness=(
+                    status.analysis_readiness
+                    if status.analysis_readiness in {"ready", "partial"}
+                    else "partial"
+                ),
+            )
+            for status in asset_statuses
+            if status.asset_id in refs and status.readiness == "ready"
+        )
         return AgentTurnContext(
             turn_id=turn_id,
             project_id=request.project_id,
@@ -93,11 +134,12 @@ class AgentTurnContextBuilder:
             document_hash=revision.document_hash,
             instruction=request.instruction,
             document=document,
+            assets=runtime_assets,
             moments=scoped_moments,
             conversation_history=recent,
             history_truncated=len(history) > len(recent),
             workspace=request.workspace,
-            allowed_tools=CONTINUOUS_EDIT_TOOLS,
+            allowed_tools=self._allowed_tools,
             max_tool_steps=DEFAULT_MAX_TOOL_STEPS,
         )
 
@@ -124,6 +166,8 @@ def _document_target_ids(document: ProjectDoc) -> set[str]:
 __all__ = [
     "AgentTurnContextBuilder",
     "AgentTurnContextError",
+    "BASE_CONTINUOUS_EDIT_TOOLS",
+    "COMPONENT_EDIT_TOOLS",
     "CONTINUOUS_EDIT_TOOLS",
     "DEFAULT_MAX_TOOL_STEPS",
 ]

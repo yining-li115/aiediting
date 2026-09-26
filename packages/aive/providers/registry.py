@@ -45,15 +45,6 @@ _ADAPTERS: dict[tuple[str, Role], Factory] = {
 }
 
 
-def _offline_director_factory(**kwargs: Any) -> BaseProvider:
-    from ..agent.provider import OfflineDirectorProvider  # noqa: PLC0415
-
-    return OfflineDirectorProvider(**kwargs)
-
-
-_ADAPTERS[("mock", Role.DIRECTOR)] = _offline_director_factory
-
-
 def _offline_render_reviewer_factory(**kwargs: Any) -> BaseProvider:
     from ..agent.render_review import (  # noqa: PLC0415
         OfflineRenderReviewerProvider,

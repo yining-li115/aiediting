@@ -61,7 +61,7 @@ async def test_failed_job_captures_the_error(isolated_db) -> None:
     job = get_job(job_id)
     assert job["status"] == "failed"
     assert job["stage"] == Stage.FAILED.value
-    assert "ffmpeg exploded" in job["error"]
+    assert job["error"] == "ffmpeg exploded"
 
 
 async def test_job_can_only_be_claimed_once(isolated_db) -> None:

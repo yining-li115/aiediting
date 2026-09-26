@@ -6,28 +6,51 @@ import pytest
 
 from aive.agent.continuous_edit import AgentToolStepLimitExceeded
 from aive.agent.harness import VideoAgentHarness
-from aive.agent.provider import OfflineDirectorProvider
 from aive.agent.tools import AgentToolPermissionError, AgentToolRegistry
 from aive.contracts.conversation import (
     AgentStepDecision,
     AgentTurnContext,
+    CreateComponentCandidateCall,
     InspectMediaCall,
     MomentSearchQuery,
     PatchProposal,
     ProposePatchCall,
     ReadProjectCall,
+    SearchComponentsCall,
     SearchMomentsCall,
     WorkspaceSelection,
+)
+from aive.contracts.components import (
+    ComponentApproval,
+    ComponentCandidate,
+    ComponentLicense,
+    ComponentSearchQuery,
+    ComponentSourceFile,
+    ComponentValidationReport,
+    CreateComponentCandidateRequest,
+    PublishedComponent,
+    RemotionComponentManifest,
 )
 from aive.contracts.director import FirstCutDecision
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.patch import PatchScope
-from aive.contracts.patch_project import SetTimelineDuration
-from aive.contracts.patch_timeline import SetAudioGain, SetVisualOutput
+from aive.contracts.patch_project import AddTrack, SetDependencies, SetTimelineDuration
+from aive.contracts.patch_timeline import (
+    ReplaceAudioSource,
+    ReplaceVisualSource,
+    SetAudioGain,
+    SetAudioOutput,
+    SetAudioPlayback,
+    SetVideoPlayback,
+    SetVisualOutput,
+    VideoSourceSelection,
+)
 from aive.contracts.project_doc import (
     AssetRef,
     AudioClip,
     AudioTrack,
+    GraphicClip,
+    GraphicTrack,
     DependencyRef,
     DependencySet,
     OutputSettings,
@@ -45,6 +68,76 @@ from aive.contracts.time import FrameRange
 NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
 
 
+def _manifest(*, run_id: str = "turn_edit") -> RemotionComponentManifest:
+    return RemotionComponentManifest(
+        capability_kind="component",
+        usage="graphic",
+        name="graphic.investor-lower-third",
+        version="1.0.0",
+        remotion_version="4.0.529",
+        parameter_schema={
+            "type": "object",
+            "properties": {"headline": {"type": "string"}},
+            "required": ["headline"],
+            "additionalProperties": False,
+        },
+        example_props={"headline": "AIVE"},
+        license=ComponentLicense(
+            license_id="generated-for-project",
+            source="generated",
+            commercial_use_allowed=True,
+        ),
+        created_by_run_id=run_id,
+    )
+
+
+def _published_component() -> PublishedComponent:
+    return PublishedComponent(
+        manifest=_manifest(),
+        candidate_id="candidate_lower_third",
+        source_digest="a" * 64,
+        bundle_digest="b" * 64,
+        preview_digest="c" * 64,
+        approval=ComponentApproval(
+            candidate_id="candidate_lower_third",
+            approved_by="user_owner",
+            summary="Approved for the investor demo",
+            approved_at=NOW,
+        ),
+    )
+
+
+class FakeComponentTools:
+    def __init__(self) -> None:
+        self.component = _published_component()
+        self.created: list[CreateComponentCandidateRequest] = []
+
+    def search(self, query):
+        return (self.component,) if query.usage in {None, "graphic"} else ()
+
+    def create_candidate(self, request):
+        self.created.append(request)
+        return ComponentCandidate(
+            candidate_id=request.candidate_id,
+            request_id=request.request_id,
+            manifest=request.manifest,
+            source_digest="d" * 64,
+            bundle_digest="e" * 64,
+            preview_digest="f" * 64,
+            status="validated",
+            report=ComponentValidationReport(
+                accepted=True,
+                sandboxed=True,
+                network_disabled=True,
+                build_succeeded=True,
+                preview_succeeded=True,
+                runtime_version="4.0.529",
+                duration_ms=100,
+            ),
+            created_at=NOW,
+        )
+
+
 def _context(
     *,
     allowed_tools=None,
@@ -59,7 +152,10 @@ def _context(
             target_duration_frames=60,
             prompt="Travel edit",
         ),
-        assets=(AssetRef(asset_id="asset_video", kind="video"),),
+        assets=(
+            AssetRef(asset_id="asset_video", kind="video"),
+            AssetRef(asset_id="asset_replacement", kind="video"),
+        ),
         timeline=Timeline(
             duration_frames=60,
             output=OutputSettings(
@@ -120,6 +216,20 @@ def _context(
                 semantic_status="ready",
                 semantic="A strong opening",
                 semantic_role="opening",
+            ),
+            MomentEvidence(
+                moment_id="moment_replacement",
+                project_id="project_edit",
+                asset_id="asset_replacement",
+                ordinal=0,
+                shot_ids=("shot_replacement",),
+                source=MediaSourceSpan(start=0, end=2_000),
+                analysis_window_count=1,
+                keyframe_count=1,
+                technical_quality=0.95,
+                semantic_status="ready",
+                semantic="Bright replacement close-up",
+                semantic_role="body",
             ),
         ),
         workspace=WorkspaceSelection(
@@ -277,6 +387,173 @@ def test_tool_registry_rejects_visual_timing_without_matching_source_audio() -> 
         )
 
 
+def test_tool_registry_rejects_replacement_that_leaves_old_source_audio() -> None:
+    registry = AgentToolRegistry(_context())
+    _inspect_replacement_moment(registry)
+    proposal = PatchProposal(
+        summary="Replace only the picture",
+        rationale="This intentionally leaves the old source audio attached.",
+        scope=PatchScope(kind="bounded", target_ids=("video_clip",)),
+        operations=(
+            ReplaceVisualSource(
+                operation_id="operation_replace_visual_only",
+                clip_id="video_clip",
+                source=VideoSourceSelection(
+                    asset_id="asset_replacement",
+                    source=SourceRange(start=0, end=2_000, timescale=1_000),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(AgentToolPermissionError, match="matching source audio"):
+        registry.execute(
+            ProposePatchCall(call_id="call_replace_visual_only", proposal=proposal)
+        )
+
+
+def test_tool_registry_accepts_replacement_with_matching_source_audio() -> None:
+    registry = AgentToolRegistry(_context())
+    _inspect_replacement_moment(registry)
+    proposal = PatchProposal(
+        summary="Replace picture and source audio",
+        rationale="Both sides use the inspected replacement Moment range.",
+        scope=PatchScope(
+            kind="bounded",
+            target_ids=("video_clip", "audio_clip"),
+        ),
+        operations=(
+            ReplaceVisualSource(
+                operation_id="operation_replace_visual",
+                clip_id="video_clip",
+                source=VideoSourceSelection(
+                    asset_id="asset_replacement",
+                    source=SourceRange(start=0, end=2_000, timescale=1_000),
+                ),
+            ),
+            ReplaceAudioSource(
+                operation_id="operation_replace_audio",
+                clip_id="audio_clip",
+                asset_id="asset_replacement",
+                source=SourceRange(start=0, end=2_000, timescale=1_000),
+            ),
+        ),
+    )
+
+    result = registry.execute(
+        ProposePatchCall(call_id="call_replace_paired", proposal=proposal)
+    )
+
+    assert result.proposal == proposal
+
+
+def test_tool_registry_rejects_replacement_without_inspected_moment() -> None:
+    registry = AgentToolRegistry(_context())
+    proposal = PatchProposal(
+        summary="Replace from an unverified source",
+        rationale="The source was not returned by inspect_media.",
+        scope=PatchScope(
+            kind="bounded",
+            target_ids=("video_clip", "audio_clip"),
+        ),
+        operations=(
+            ReplaceVisualSource(
+                operation_id="operation_unverified_visual",
+                clip_id="video_clip",
+                source=VideoSourceSelection(
+                    asset_id="asset_replacement",
+                    source=SourceRange(start=0, end=2_000, timescale=1_000),
+                ),
+            ),
+            ReplaceAudioSource(
+                operation_id="operation_unverified_audio",
+                clip_id="audio_clip",
+                asset_id="asset_replacement",
+                source=SourceRange(start=0, end=2_000, timescale=1_000),
+            ),
+        ),
+    )
+
+    with pytest.raises(AgentToolPermissionError, match="inspected Moment"):
+        registry.execute(
+            ProposePatchCall(call_id="call_unverified_replace", proposal=proposal)
+        )
+
+
+def test_tool_registry_does_not_treat_same_asset_slip_as_trim_evidence() -> None:
+    registry = AgentToolRegistry(_context())
+    proposal = PatchProposal(
+        summary="Slip to another range in the same asset",
+        rationale="The output duration is unchanged, so this is replacement, not Trim.",
+        scope=PatchScope(
+            kind="bounded",
+            target_ids=("video_clip", "audio_clip"),
+        ),
+        operations=(
+            ReplaceVisualSource(
+                operation_id="operation_same_asset_visual",
+                clip_id="video_clip",
+                source=VideoSourceSelection(
+                    asset_id="asset_video",
+                    source=SourceRange(start=500, end=2_500, timescale=1_000),
+                ),
+            ),
+            ReplaceAudioSource(
+                operation_id="operation_same_asset_audio",
+                clip_id="audio_clip",
+                asset_id="asset_video",
+                source=SourceRange(start=500, end=2_500, timescale=1_000),
+            ),
+        ),
+    )
+
+    with pytest.raises(AgentToolPermissionError, match="inspected Moment"):
+        registry.execute(
+            ProposePatchCall(call_id="call_same_asset_slip", proposal=proposal)
+        )
+
+
+def test_tool_registry_accepts_paired_constant_speed_without_fake_trim() -> None:
+    registry = AgentToolRegistry(_context())
+    proposal = PatchProposal(
+        summary="Play the shot twice as fast",
+        rationale="Keep the source range and halve the output duration.",
+        scope=PatchScope(kind="global", allow_ripple=True),
+        operations=(
+            SetVideoPlayback(
+                operation_id="operation_video_speed",
+                clip_id="video_clip",
+                playback={"kind": "constant", "rate": {"num": 2, "den": 1}},
+            ),
+            SetVisualOutput(
+                operation_id="operation_video_duration",
+                clip_id="video_clip",
+                output=FrameRange(start_frame=0, duration_frames=30),
+            ),
+            SetAudioPlayback(
+                operation_id="operation_audio_speed",
+                clip_id="audio_clip",
+                playback={"kind": "constant", "rate": {"num": 2, "den": 1}},
+            ),
+            SetAudioOutput(
+                operation_id="operation_audio_duration",
+                clip_id="audio_clip",
+                output=FrameRange(start_frame=0, duration_frames=30),
+            ),
+            SetTimelineDuration(
+                operation_id="operation_speed_duration",
+                duration_frames=30,
+            ),
+        ),
+    )
+
+    result = registry.execute(
+        ProposePatchCall(call_id="call_speed_paired", proposal=proposal)
+    )
+
+    assert result.proposal == proposal
+
+
 def test_tool_registry_rejects_stale_or_invented_clip_ids() -> None:
     registry = AgentToolRegistry(_context())
     proposal = PatchProposal(
@@ -343,6 +620,22 @@ async def test_harness_runs_search_inspect_and_patch_as_a_bounded_loop() -> None
         "propose_patch",
     ]
     assert outcome.proposal == proposal
+
+
+def _inspect_replacement_moment(registry: AgentToolRegistry) -> None:
+    search = registry.execute(
+        SearchMomentsCall(
+            call_id="call_search_replacement",
+            query=MomentSearchQuery(text="Bright replacement close-up"),
+        )
+    )
+    assert any(hit.moment_id == "moment_replacement" for hit in search.hits)
+    registry.execute(
+        InspectMediaCall(
+            call_id="call_inspect_replacement",
+            moment_ids=("moment_replacement",),
+        )
+    )
 
 
 async def test_harness_returns_rejected_patch_error_for_bounded_correction() -> None:
@@ -461,27 +754,148 @@ async def test_harness_stops_a_provider_that_exceeds_the_tool_limit() -> None:
         await harness.run_edit_turn(_context(max_tool_steps=2))
 
 
-async def test_offline_provider_creates_a_real_audio_gain_patch() -> None:
-    harness = VideoAgentHarness(provider=OfflineDirectorProvider())
+def test_graphic_component_must_be_returned_by_search_before_patch() -> None:
+    component_tools = FakeComponentTools()
+    context = _context(
+        allowed_tools=("search_components", "propose_patch"),
+    )
+    proposal = PatchProposal(
+        summary="Add the approved investor lower third",
+        rationale="The exact published component was selected from the registry.",
+        scope=PatchScope(kind="global"),
+        operations=(
+            SetDependencies(
+                operation_id="operation_pin_graphic_component",
+                dependencies=context.document.dependencies.model_copy(
+                    update={
+                        "components": (
+                            DependencyRef(
+                                name="graphic.investor-lower-third",
+                                version="1.0.0",
+                                content_hash="b" * 64,
+                            ),
+                        )
+                    }
+                ),
+            ),
+            AddTrack(
+                operation_id="operation_add_graphic_track",
+                track=GraphicTrack(
+                    track_id="track_graphics",
+                    graphics=(
+                        GraphicClip(
+                            graphic_id="graphic_lower_third",
+                            output=FrameRange(start_frame=0, duration_frames=30),
+                            component_name="graphic.investor-lower-third",
+                            component_version="1.0.0",
+                            props={"headline": "AIVE"},
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    registry = AgentToolRegistry(context, component_tools=component_tools)
 
-    outcome = await harness.run_edit_turn(_context())
+    with pytest.raises(AgentToolPermissionError, match="search_components"):
+        registry.execute(ProposePatchCall(call_id="call_unsearched", proposal=proposal))
 
-    assert [step.call.tool for step in outcome.steps] == [
-        "read_project",
-        "propose_patch",
-    ]
-    assert outcome.proposal is not None
-    operation = outcome.proposal.operations[0]
-    assert operation.op == "set_audio_gain"
-    assert operation.gain_db == -6
-
-
-async def test_offline_provider_resolves_an_audio_track_selection_to_its_clips() -> None:
-    harness = VideoAgentHarness(provider=OfflineDirectorProvider())
-
-    outcome = await harness.run_edit_turn(
-        _context(selected_target_ids=("track_audio",))
+    search = registry.execute(
+        SearchComponentsCall(
+            call_id="call_search_components",
+            query=ComponentSearchQuery(usage="graphic"),
+        )
+    )
+    without_dependency_pin = proposal.model_copy(
+        update={
+            "scope": PatchScope(
+                kind="bounded",
+                target_ids=(context.project_id,),
+            ),
+            "operations": proposal.operations[1:],
+        }
+    )
+    with pytest.raises(AgentToolPermissionError, match="set_dependencies"):
+        registry.execute(
+            ProposePatchCall(
+                call_id="call_unpinned_graphic_patch",
+                proposal=without_dependency_pin,
+            )
+        )
+    result = registry.execute(
+        ProposePatchCall(call_id="call_graphic_patch", proposal=proposal)
     )
 
-    assert outcome.proposal is not None
-    assert outcome.proposal.scope.target_ids == ("audio_clip",)
+    assert search.components == (component_tools.component,)
+    assert result.proposal == proposal
+
+
+async def test_harness_creates_validated_candidate_without_publishing_it() -> None:
+    component_tools = FakeComponentTools()
+    request = CreateComponentCandidateRequest(
+        request_id="request_component",
+        candidate_id="candidate_generated",
+        manifest=_manifest(),
+        source_files=(
+            ComponentSourceFile(
+                path="component.tsx",
+                content=(
+                    'import React from "react";\n'
+                    "export const Component = ({headline}) => <div>{headline}</div>;"
+                ),
+            ),
+        ),
+    )
+    provider = ScriptedProvider(
+        (
+            AgentStepDecision(
+                kind="tool_call",
+                call=CreateComponentCandidateCall(
+                    call_id="call_create_candidate",
+                    request=request,
+                ),
+            ),
+            AgentStepDecision(
+                kind="finish",
+                response="候选组件已通过沙箱验证，等待你明确批准后才能使用。",
+            ),
+        )
+    )
+    outcome = await VideoAgentHarness(
+        provider=provider,
+        component_tools=component_tools,
+    ).run_edit_turn(
+        _context(allowed_tools=("create_component_candidate",)),
+    )
+
+    assert outcome.proposal is None
+    assert outcome.steps[0].result.component_candidate is not None
+    assert outcome.steps[0].result.component_candidate.status == "validated"
+    assert component_tools.created == [request]
+    assert "批准" in outcome.response
+
+
+def test_candidate_generation_is_bound_to_the_current_agent_turn() -> None:
+    request = CreateComponentCandidateRequest(
+        request_id="request_wrong_turn",
+        candidate_id="candidate_wrong_turn",
+        manifest=_manifest(run_id="turn_other"),
+        source_files=(
+            ComponentSourceFile(
+                path="component.tsx",
+                content="export const Component = () => null;",
+            ),
+        ),
+    )
+    registry = AgentToolRegistry(
+        _context(allowed_tools=("create_component_candidate",)),
+        component_tools=FakeComponentTools(),
+    )
+
+    with pytest.raises(AgentToolPermissionError, match="turn_id"):
+        registry.execute(
+            CreateComponentCandidateCall(
+                call_id="call_wrong_turn",
+                request=request,
+            )
+        )

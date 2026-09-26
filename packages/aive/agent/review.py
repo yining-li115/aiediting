@@ -82,17 +82,101 @@ class FirstCutReviewer:
                 )
             )
 
-        if decision.music_strategy.mode == "music_bed" and not any(
-            "music" in asset.roles for asset in context.assets
+        if (
+            context.intent.caption_policy == "none"
+            and decision.copy_strategy.caption_mode != "none"
         ):
             issues.append(
                 DirectorReviewIssue(
-                    code="music_asset_unavailable",
+                    code="captions_disabled",
                     severity="error",
-                    message="Music-bed strategy requires an authorized music Asset.",
+                    message="Project intent explicitly disables captions.",
                     repairable=True,
                 )
             )
+        if (
+            context.intent.caption_policy == "auto"
+            and decision.copy_strategy.caption_mode == "none"
+            and any(
+                moments[moment_id].has_speech
+                for moment_id in decision.moment_ids
+                if moment_id in moments
+            )
+        ):
+            issues.append(
+                DirectorReviewIssue(
+                    code="captions_required",
+                    severity="error",
+                    message="Project intent requests captions for selected speech.",
+                    repairable=True,
+                )
+            )
+        if (
+            decision.copy_strategy.caption_mode != "none"
+            and not any(
+                moments[moment_id].asr_text
+                for moment_id in decision.moment_ids
+                if moment_id in moments
+            )
+        ):
+            issues.append(
+                DirectorReviewIssue(
+                    code="caption_evidence_unavailable",
+                    severity="error",
+                    message="Caption strategy requires ASR text on a selected Moment.",
+                    repairable=True,
+                )
+            )
+
+        if (
+            context.intent.music_policy == "none"
+            and decision.music_strategy.mode == "music_bed"
+        ):
+            issues.append(
+                DirectorReviewIssue(
+                    code="music_disabled",
+                    severity="error",
+                    message="Project intent explicitly disables background music.",
+                    repairable=True,
+                )
+            )
+        if (
+            context.intent.music_policy == "auto"
+            and decision.music_strategy.mode != "music_bed"
+            and any("music" in asset.roles for asset in context.assets)
+        ):
+            issues.append(
+                DirectorReviewIssue(
+                    code="music_required",
+                    severity="error",
+                    message="Project intent requests the available authorized music Asset.",
+                    repairable=True,
+                )
+            )
+
+        if decision.music_strategy.mode == "music_bed":
+            music_asset = assets.get(decision.music_strategy.asset_id or "")
+            if music_asset is None or "music" not in music_asset.roles:
+                issues.append(
+                    DirectorReviewIssue(
+                        code="music_asset_unavailable",
+                        severity="error",
+                        message=(
+                            "Music-bed strategy must name an authorized music Asset "
+                            "from the frozen context."
+                        ),
+                        repairable=True,
+                    )
+                )
+            elif not music_asset.has_audio:
+                issues.append(
+                    DirectorReviewIssue(
+                        code="music_asset_has_no_audio",
+                        severity="error",
+                        message="Selected music Asset has no audio stream.",
+                        repairable=True,
+                    )
+                )
 
         if decision.music_strategy.mode == "source_only" and not any(
             asset.has_audio and asset.asset_id in selected_asset_ids

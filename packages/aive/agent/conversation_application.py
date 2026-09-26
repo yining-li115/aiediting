@@ -20,11 +20,13 @@ from ..contracts.patch import Patch
 from ..contracts.rendering import CreateRenderRequest
 from ..jobs import Stage
 from ..media.analysis_repository import MediaAnalysisRepository
+from ..media.repository import MediaAssetRepository
 from ..project.application import ProjectRevisionApplication
 from ..project.hashing import canonical_model_hash
 from ..rendering.application import RevisionRenderApplication
 from ..rendering.application import RenderApplicationError
 from ..rendering.ffmpeg import ProjectRenderUnsupported
+from ..rendering.repository import RenderArtifactNotFound
 from ..specs.base import new_id
 from .conversation_repository import ConversationRepository
 from .harness import VideoAgentHarness
@@ -55,6 +57,7 @@ class ConversationApplication:
         analysis: MediaAnalysisRepository,
         rendering: RevisionRenderApplication,
         harness: VideoAgentHarness,
+        assets: MediaAssetRepository | None = None,
         id_factory: Callable[[str], str] = new_id,
     ) -> None:
         self._repository = repository
@@ -62,6 +65,7 @@ class ConversationApplication:
         self._analysis = analysis
         self._rendering = rendering
         self._harness = harness
+        self._assets = assets
         self._id_factory = id_factory
 
     def create_conversation(
@@ -88,6 +92,10 @@ class ConversationApplication:
             raise ContinuousEditUnavailable(
                 "continuous edit must target the current project revision"
             )
+        self._validate_preview_annotations(
+            request,
+            duration_frames=current.document.timeline.duration_frames,
+        )
         conversation = self._repository.get(
             request.project_id,
             request.conversation_id,
@@ -103,6 +111,46 @@ class ConversationApplication:
             provider=self._harness.provider_name,
             provider_version=self._harness.provider_version,
         )
+
+    def _validate_preview_annotations(
+        self,
+        request: CreateAgentTurnRequest,
+        *,
+        duration_frames: int,
+    ) -> None:
+        for annotation in request.workspace.preview_annotations:
+            try:
+                artifact = self._rendering.get(
+                    request.project_id,
+                    annotation.artifact_id,
+                )
+            except RenderArtifactNotFound as exc:
+                raise ContinuousEditUnavailable(
+                    f"preview artifact {annotation.artifact_id!r} is unavailable"
+                ) from exc
+            if artifact.revision_id != request.base_revision_id:
+                raise ContinuousEditUnavailable(
+                    "preview annotation targets an artifact from another revision"
+                )
+            if artifact.kind != "preview" or artifact.status != "ready":
+                raise ContinuousEditUnavailable(
+                    "preview annotation requires a ready preview artifact"
+                )
+            artifact_start = (
+                artifact.output_range.start_frame if artifact.output_range else 0
+            )
+            artifact_end = (
+                artifact.output_range.end_frame
+                if artifact.output_range
+                else duration_frames
+            )
+            if (
+                annotation.output_range.start_frame < artifact_start
+                or annotation.output_range.end_frame > artifact_end
+            ):
+                raise ContinuousEditUnavailable(
+                    "preview annotation range is outside its rendered artifact"
+                )
 
     async def process(self, handle: AgentTurnProgressReporter) -> dict:
         turn = self._repository.get_job_turn(handle.job_id)
@@ -132,6 +180,11 @@ class ConversationApplication:
                     revision=current,
                     moments=self._analysis.list_moments(turn.project_id),
                     history=self._repository.history_before_turn(handle.job_id),
+                    asset_statuses=(
+                        self._assets.list_processing_status(turn.project_id)
+                        if self._assets is not None
+                        else ()
+                    ),
                 )
                 turn = self._repository.save_context(handle.job_id, context)
             handle.update(stage=Stage.PLANNING, progress=0.1)
@@ -292,19 +345,33 @@ def _explain_applied_patch(
     for operation in patch.operations:
         counts[operation.op] = counts.get(operation.op, 0) + 1
     labels = {
+        "add_track": "新增字幕、音频或图形轨道",
         "set_creative_plan": "更新创作计划",
         "set_timeline_duration": "调整成片时长",
+        "set_dependencies": "固定渲染组件版本",
         "delete_visual_clip": "删除镜头",
         "replace_visual_source": "替换画面来源",
         "set_visual_output": "调整镜头位置或时长",
         "set_video_playback": "调整画面播放映射",
         "set_visual_crop": "调整画面裁剪",
+        "set_visual_reframe": "调整画面构图",
         "delete_audio_clip": "删除关联音频",
         "replace_audio_source": "替换音频来源",
         "set_audio_output": "调整音频位置或时长",
         "set_audio_playback": "调整音频播放映射",
         "set_audio_gain": "调整音量",
         "set_audio_fades": "调整音频淡入淡出",
+        "set_audio_ducking": "调整人声避让",
+        "insert_audio_clip": "加入音频素材",
+        "add_caption": "新增字幕",
+        "update_caption_text": "修改字幕文字",
+        "set_caption_output": "调整字幕时序",
+        "delete_caption": "删除字幕",
+        "set_caption_style": "调整字幕样式",
+        "add_graphic": "新增图形",
+        "set_graphic_output": "调整图形时序",
+        "update_graphic_props": "调整图形内容或样式",
+        "delete_graphic": "删除图形",
     }
     changes = "、".join(
         f"{labels[name]} {count} 处" for name, count in counts.items()

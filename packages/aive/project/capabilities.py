@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from pydantic import ValidationError
+
+from ..contracts.captions import (
+    CLEAN_CAPTION_COMPONENT,
+    CLEAN_CAPTION_VERSION,
+    CleanCaptionParameters,
+)
 from ..contracts.revision import ProjectRevision
 from .service import CapabilityUse, CapabilityValidator, iter_capability_uses
 
@@ -15,6 +22,26 @@ class UnconfiguredCapabilityValidator:
     """
 
     def rejection_reason(self, capability: CapabilityUse) -> str:
+        return (
+            f"{capability.kind} capability {capability.name!r} "
+            f"at version {capability.version!r} is not installed"
+        )
+
+
+class DefaultCapabilityValidator:
+    """Registry for the small executable capability set shipped by default."""
+
+    def rejection_reason(self, capability: CapabilityUse) -> str | None:
+        if (
+            capability.kind == "component"
+            and capability.name == CLEAN_CAPTION_COMPONENT
+            and capability.version == CLEAN_CAPTION_VERSION
+        ):
+            try:
+                CleanCaptionParameters.model_validate(capability.parameters)
+            except ValidationError as exc:
+                return f"invalid caption.clean parameters: {exc.errors()[0]['msg']}"
+            return None
         return (
             f"{capability.kind} capability {capability.name!r} "
             f"at version {capability.version!r} is not installed"

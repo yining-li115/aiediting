@@ -5,6 +5,14 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from aive.components import (
+    ComponentApplicationError,
+    ComponentCandidateConflict,
+    ComponentCandidateNotFound,
+    ComponentCandidateRejected,
+    ComponentPublicationConflict,
+    ComponentRegistryError,
+)
 from aive.media.repository import (
     AssetIdentityConflict,
     MediaProcessingConflict,
@@ -87,6 +95,12 @@ def install_project_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AgentTurnNotFound, _not_found)
     app.add_exception_handler(ConversationConflict, _repository_conflict)
     app.add_exception_handler(ContinuousEditUnavailable, _continuous_edit_unavailable)
+    app.add_exception_handler(ComponentCandidateNotFound, _not_found)
+    app.add_exception_handler(ComponentCandidateConflict, _component_conflict)
+    app.add_exception_handler(ComponentPublicationConflict, _component_conflict)
+    app.add_exception_handler(ComponentCandidateRejected, _component_rejected)
+    app.add_exception_handler(ComponentRegistryError, _component_rejected)
+    app.add_exception_handler(ComponentApplicationError, _component_rejected)
     app.add_exception_handler(FFmpegError, _render_unsupported)
     app.add_exception_handler(
         AssetAuthorizationUnavailable,
@@ -204,6 +218,14 @@ async def _first_cut_unavailable(_: Request, exc: Exception) -> JSONResponse:
 
 async def _continuous_edit_unavailable(_: Request, exc: Exception) -> JSONResponse:
     return _error(409, "continuous_edit_unavailable", str(exc), retryable=True)
+
+
+async def _component_conflict(_: Request, exc: Exception) -> JSONResponse:
+    return _error(409, "component_conflict", str(exc))
+
+
+async def _component_rejected(_: Request, exc: Exception) -> JSONResponse:
+    return _error(422, "component_rejected", str(exc))
 
 
 def _error(

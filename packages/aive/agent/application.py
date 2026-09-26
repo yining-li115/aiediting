@@ -178,6 +178,9 @@ class DirectorApplication:
                 run_id=run.run_id,
                 request_id=run.request_id,
                 asset_has_audio={asset.asset_id: asset.has_audio for asset in context.assets},
+                asset_duration_seconds={
+                    asset.asset_id: asset.duration_seconds for asset in context.assets
+                },
             )
             write = self._projects.apply_patch(patch, require_review=True)
             if write.revision is None:
@@ -268,6 +271,10 @@ class DirectorApplication:
                 ),
                 asset_has_audio={
                     asset.asset_id: asset.has_audio for asset in run.context.assets
+                },
+                asset_duration_seconds={
+                    asset.asset_id: asset.duration_seconds
+                    for asset in run.context.assets
                 },
                 candidate_attempt=run.render_autofix_context.attempt,
             )

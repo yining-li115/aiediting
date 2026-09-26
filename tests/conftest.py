@@ -23,17 +23,25 @@ requires_ffmpeg = pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg not installe
 
 @pytest.fixture(autouse=True)
 def offline_stack(monkeypatch):
-    """Pin every role to its offline implementation for the whole suite.
+    """Pin non-Director roles to offline implementations for the test suite.
 
     ACTIVE_STACK points at real vendors, and a test that silently starts
     calling one would need a key, cost money, and fail differently depending
-    on whose machine it runs on. Tests that want a vendor adapter construct it
-    explicitly with a mock transport.
+    on whose machine it runs on. Director tests inject explicit scripted
+    providers; the registry itself remains pointed at a real adapter so tests
+    cannot accidentally restore the removed runtime fallback.
     """
     from aive.roles import Role
 
     for role in Role:
-        default = "passthrough" if role is Role.CRITIC else "mock"
+        if role is Role.CRITIC:
+            default = "passthrough"
+        elif role is Role.DIRECTOR:
+            # Director has no offline runtime adapter. Tests that exercise its
+            # behavior inject an explicit scripted fixture instead.
+            default = "gemini-3.6-flash"
+        else:
+            default = "mock"
         monkeypatch.setenv(f"AIVE_ROLE_{role.name}_MODEL", default)
     monkeypatch.delenv("AIVE_ROLE_DIRECTOR_FALLBACK_MODELS", raising=False)
 

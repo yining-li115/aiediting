@@ -302,6 +302,6 @@ permits only exact capabilities inherited from a committed base/restore source
 Revision. A new definition, version, owner, or parameter value fails closed;
 production code does not silently accept unknown effects. New browser projects
 initialize correctly, upload video/photo Assets through an immutable Revision,
-derive Moments, run the durable offline Director, commit an agent-origin
+derive Moments, run the configured real Director, commit an agent-origin
 first-cut Revision, and automatically render a revision-bound preview. See
 `DIRECTOR_V1.md` and `RENDERING_V1.md`.

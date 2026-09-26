@@ -46,6 +46,11 @@ export const UPLOAD_LIMITS = {
     supportsLabel: "Supports: MP4, MOV",
     maxSizeLabel: "Up to 5GB per file",
   },
+  music: {
+    accept: "audio/mpeg,audio/mp4,audio/wav,audio/aac,audio/flac,audio/ogg",
+    supportsLabel: "Supports: MP3, WAV, M4A, AAC, FLAC, OGG",
+    maxSizeLabel: "Use owned or licensed music",
+  },
 } as const;
 
 // TODO 硬编码: how many thumbnails to show before collapsing into "+N".
@@ -125,15 +130,10 @@ export const DEFAULT_SETTINGS = {
 
 /* --- features not wired to the backend ------------------------------------ */
 
-// TODO 硬编码: these three toggles have no backend equivalent yet.
-//   autoCaptions   -> needs ASR (block C's remaining item)
-//   backgroundMusic -> maps to EditPlanSpec.audio.use_music, but the generate
-//                      endpoint does not accept it
-//   soundEffects   -> no backend concept at all
-export const UNWIRED_SETTINGS = [
-  "autoCaptions",
-  "soundEffects",
-] as const;
+// TODO 硬编码: soundEffects has no connected first-cut behavior yet.
+// autoCaptions and backgroundMusic are persisted as typed ProjectIntent
+// policies and deterministically checked against the Director decision.
+export const UNWIRED_SETTINGS = ["soundEffects"] as const;
 
 /* --- credits -------------------------------------------------------------- */
 

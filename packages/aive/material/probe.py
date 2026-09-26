@@ -223,6 +223,61 @@ def make_thumbnail(
     return out_path
 
 
+def make_audio_proxy(source: Path, out_path: Path, force: bool = False) -> Path:
+    """Create a compact AAC proxy for browser playback and waveform work."""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not force:
+        return out_path
+    cmd = [
+        settings.ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "48000",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ProbeError(f"audio proxy failed: {proc.stderr.strip()[:400]}")
+    return out_path
+
+
+def make_audio_thumbnail(source: Path, out_path: Path, force: bool = False) -> Path:
+    """Create a deterministic waveform poster for an audio-only Asset."""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not force:
+        return out_path
+    cmd = [
+        settings.ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-filter_complex",
+        "aformat=channel_layouts=mono,showwavespic=s=960x320:colors=white",
+        "-frames:v",
+        "1",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ProbeError(f"audio thumbnail failed: {proc.stderr.strip()[:400]}")
+    return out_path
+
+
 def cut_clip(source: Path, start: float, end: float, out_path: Path) -> Path:
     """Extract one segment as a standalone file.
 

@@ -1,6 +1,13 @@
 "use client";
 
-import { Bot, LoaderCircle, Send, UserRound } from "lucide-react";
+import {
+  Bot,
+  LoaderCircle,
+  MessageSquareQuote,
+  Send,
+  UserRound,
+  X,
+} from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import {
@@ -14,13 +21,18 @@ import type {
   AgentTurn,
   Conversation,
   CreateAgentTurnRequest,
+  PreviewAnnotation,
   RenderArtifact,
+  WorkspaceSelection,
 } from "@/lib/api/types";
 
 interface ConversationPanelProps {
   projectId: string;
   currentRevisionId: string | null;
   playheadFrame: number | null;
+  previewAnnotations: PreviewAnnotation[];
+  onRemovePreviewAnnotation: (annotationId: string) => void;
+  onPreviewAnnotationsConsumed: () => void;
   onRevisionChanged: () => void | Promise<void>;
 }
 
@@ -35,10 +47,64 @@ function progressLabel(stage: string | null) {
   return "Editing the project";
 }
 
+function annotationRangeLabel(annotation: PreviewAnnotation) {
+  const start = annotation.output_range.start_frame;
+  const duration = annotation.output_range.duration_frames;
+  return duration === 1
+    ? `Frame ${start}`
+    : `Frames ${start}–${start + duration - 1}`;
+}
+
+function AnnotationQuote({
+  annotation,
+  onRemove,
+  inverted = false,
+}: {
+  annotation: PreviewAnnotation;
+  onRemove?: () => void;
+  inverted?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-lg border px-2.5 py-2 text-left ${
+        inverted
+          ? "border-white/15 bg-white/10 text-white"
+          : "border-accent/20 bg-accent-soft/45 text-ink"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide ${
+            inverted ? "text-white/65" : "text-accent"
+          }`}
+        >
+          <MessageSquareQuote size={11} /> {annotationRangeLabel(annotation)}
+        </span>
+        {onRemove && (
+          <button
+            type="button"
+            aria-label="Remove preview annotation"
+            onClick={onRemove}
+            className="rounded p-0.5 text-ink-faint transition hover:bg-white/70 hover:text-ink"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+      <p className="mt-1 whitespace-pre-wrap text-[11px] leading-4">
+        {annotation.comment}
+      </p>
+    </div>
+  );
+}
+
 export function ConversationPanel({
   projectId,
   currentRevisionId,
   playheadFrame,
+  previewAnnotations,
+  onRemovePreviewAnnotation,
+  onPreviewAnnotationsConsumed,
   onRevisionChanged,
 }: ConversationPanelProps) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -94,7 +160,10 @@ export function ConversationPanel({
     if (
       request === null ||
       request.instruction !== instruction ||
-      request.base_revision_id !== currentRevisionId
+      request.base_revision_id !== currentRevisionId ||
+      request.workspace.playhead_frame !== (playheadFrame ?? undefined) ||
+      JSON.stringify(request.workspace.preview_annotations ?? []) !==
+        JSON.stringify(previewAnnotations)
     ) {
       request = {
         request_id: newStableId("agent_turn_request"),
@@ -107,10 +176,14 @@ export function ConversationPanel({
           revision_id: currentRevisionId,
           selected_target_ids: [],
           playhead_frame: playheadFrame ?? undefined,
+          preview_annotations: previewAnnotations as NonNullable<
+            WorkspaceSelection["preview_annotations"]
+          >,
         },
       };
       pendingTurn.current = request;
     }
+    if (request === null) return;
 
     setSending(true);
     setError(null);
@@ -142,6 +215,7 @@ export function ConversationPanel({
       await onRevisionChanged();
       pendingTurn.current = null;
       setDraft("");
+      onPreviewAnnotationsConsumed();
 
       if (completed.render_job_id) {
         setProgress("Rendering the new preview");
@@ -216,6 +290,19 @@ export function ConversationPanel({
                     : "border border-line bg-white text-ink"
                 }`}
               >
+                {(message.workspace?.preview_annotations ?? []).length > 0 && (
+                  <div className="mb-2 space-y-1.5">
+                    {(message.workspace?.preview_annotations ?? []).map(
+                      (annotation) => (
+                        <AnnotationQuote
+                          key={annotation.annotation_id}
+                          annotation={annotation}
+                          inverted={message.role === "user"}
+                        />
+                      ),
+                    )}
+                  </div>
+                )}
                 {message.content}
               </div>
               {message.role === "user" && (
@@ -235,34 +322,50 @@ export function ConversationPanel({
 
       {error && <p className="px-4 pb-2 text-[11px] leading-4 text-red-600">{error}</p>}
 
-      <form onSubmit={send} className="flex items-end gap-2 px-3 pb-4 pt-1">
-        <textarea
-          aria-label="Ask the AI editor"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-          disabled={!conversation || sending}
-          rows={2}
-          placeholder="Describe the next edit…"
-          className="min-h-16 flex-1 resize-none rounded-[var(--radius-control)] border border-line-strong bg-white px-3 py-2 text-xs leading-5 outline-none transition focus:border-accent disabled:bg-canvas"
-        />
-        <button
-          type="submit"
-          aria-label="Send edit request"
-          disabled={!conversation || !currentRevisionId || !draft.trim() || sending}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-accent text-white transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-35"
-        >
-          {sending ? (
-            <LoaderCircle size={15} className="animate-spin" />
-          ) : (
-            <Send size={15} />
-          )}
-        </button>
+      <form onSubmit={send} className="px-3 pb-4 pt-1">
+        {previewAnnotations.length > 0 && (
+          <div className="mb-2 space-y-1.5 rounded-xl border border-line bg-canvas p-2">
+            <p className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">
+              Referenced from preview
+            </p>
+            {previewAnnotations.map((annotation) => (
+              <AnnotationQuote
+                key={annotation.annotation_id}
+                annotation={annotation}
+                onRemove={() => onRemovePreviewAnnotation(annotation.annotation_id)}
+              />
+            ))}
+          </div>
+        )}
+        <div className="flex items-end gap-2">
+          <textarea
+            aria-label="Ask the AI editor"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+            disabled={!conversation || sending}
+            rows={2}
+            placeholder="Describe the next edit…"
+            className="min-h-16 flex-1 resize-none rounded-[var(--radius-control)] border border-line-strong bg-white px-3 py-2 text-xs leading-5 outline-none transition focus:border-accent disabled:bg-canvas"
+          />
+          <button
+            type="submit"
+            aria-label="Send edit request"
+            disabled={!conversation || !currentRevisionId || !draft.trim() || sending}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-accent text-white transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {sending ? (
+              <LoaderCircle size={15} className="animate-spin" />
+            ) : (
+              <Send size={15} />
+            )}
+          </button>
+        </div>
       </form>
     </div>
   );

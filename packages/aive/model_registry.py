@@ -134,7 +134,6 @@ _add(
             Role.RERANK,
             Role.AGENT_FAST,
             Role.AGENT_DEEP,
-            Role.DIRECTOR,
             Role.REVIEWER,
             Role.ASR,
         ),
@@ -602,9 +601,11 @@ _add(
 # ---------------------------------------------------------------------------
 # Active stack - the actual selection
 #
-# THIS IS THE LINE YOU EDIT TO SWAP A MODEL.
-# Everything defaults to offline implementations so the whole pipeline runs
-# with no API key and no cost until the bake-off freezes real choices.
+# THIS IS THE LINE YOU EDIT TO SWAP A MODEL. The Director deliberately points
+# at a real model card: model-authored editing must fail visibly when its
+# credentials or output are invalid, never fall back to a local rule policy.
+# Other roles retain their explicit local fixtures until their production
+# vertical slices replace them.
 # ---------------------------------------------------------------------------
 
 ACTIVE_STACK: dict[Role, str] = {
@@ -617,7 +618,7 @@ ACTIVE_STACK: dict[Role, str] = {
     Role.CRITIC: "passthrough",
     Role.AGENT_FAST: "mock",
     Role.AGENT_DEEP: "mock",
-    Role.DIRECTOR: "mock",
+    Role.DIRECTOR: "gemini-3.6-flash",
     Role.REVIEWER: "mock",
     Role.ASR: "mock",
 }

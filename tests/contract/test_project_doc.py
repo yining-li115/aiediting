@@ -179,6 +179,13 @@ def test_complete_timeline_supports_all_investor_demo_media_layers() -> None:
                 ),
             ),
         ),
+        dependencies=DependencySet(
+            renderer=DependencyRef(name="ffmpeg", version="dev"),
+            components=(
+                DependencyRef(name="investor-captions", version="1.0.0"),
+                DependencyRef(name="title-card", version="1.0.0"),
+            ),
+        ),
     )
 
     assert [track.kind for track in doc.timeline.tracks] == [
@@ -187,6 +194,44 @@ def test_complete_timeline_supports_all_investor_demo_media_layers() -> None:
         "caption",
         "graphic",
     ]
+
+
+def test_timeline_component_requires_exact_dependency_version() -> None:
+    graphic_track = GraphicTrack(
+        track_id="track_graphic_dependency",
+        graphics=(
+            GraphicClip(
+                graphic_id="graphic_dependency",
+                output=FrameRange(start_frame=0, duration_frames=30),
+                component_name="graphic.title-card",
+                component_version="1.0.0",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="missing from dependencies"):
+        _doc(
+            timeline=_doc().timeline.model_copy(
+                update={
+                    "tracks": (*_doc().timeline.tracks, graphic_track),
+                }
+            )
+        )
+
+    with pytest.raises(ValidationError, match="disagrees with dependency version"):
+        _doc(
+            timeline=_doc().timeline.model_copy(
+                update={
+                    "tracks": (*_doc().timeline.tracks, graphic_track),
+                }
+            ),
+            dependencies=DependencySet(
+                renderer=DependencyRef(name="ffmpeg", version="dev"),
+                components=(
+                    DependencyRef(name="graphic.title-card", version="2.0.0"),
+                ),
+            ),
+        )
 
 
 def test_visual_motion_and_transition_are_extensible_versioned_definitions() -> None:

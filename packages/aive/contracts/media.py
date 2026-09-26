@@ -73,7 +73,7 @@ class AssetProcessingStatus(ContractModel):
 
     asset_id: DatabaseId
     project_id: DatabaseId
-    kind: Literal["video", "photo"]
+    kind: Literal["video", "photo", "audio"]
     original_name: str = Field(min_length=1, max_length=255)
     readiness: MediaReadiness
     processing_job_id: StableId | None = None

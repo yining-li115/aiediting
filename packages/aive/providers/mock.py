@@ -1,4 +1,4 @@
-"""Deterministic offline implementations of every role.
+"""Deterministic offline implementations of non-Director test roles.
 
 These exist so that the entire pipeline skeleton can be built and tested
 before the model bake-off freezes the real stack, and so that CI never needs

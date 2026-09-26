@@ -112,7 +112,7 @@ def test_turn_enqueue_messages_and_completion_are_durable(repository) -> None:
         job_id="job_turn_1",
         user_message_id="message_user_1",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
     replay = repo.enqueue_turn(
@@ -121,7 +121,7 @@ def test_turn_enqueue_messages_and_completion_are_durable(repository) -> None:
         job_id="job_unused",
         user_message_id="message_unused",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
     completed = repo.complete(
@@ -145,7 +145,7 @@ def test_turn_enqueue_messages_and_completion_are_durable(repository) -> None:
         job_id="job_turn_2",
         user_message_id="message_user_2",
         request_hash="b" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
     prior_history = repo.history_before_turn(second.turn.job_id)
@@ -177,7 +177,7 @@ def test_turn_idempotency_key_cannot_change_instruction(repository) -> None:
         job_id="job_turn_1",
         user_message_id="message_user_1",
         request_hash="a" * 64,
-        provider="offline-director",
+        provider="fixture-director",
         provider_version="1",
     )
 
@@ -188,6 +188,6 @@ def test_turn_idempotency_key_cannot_change_instruction(repository) -> None:
             job_id="job_turn_2",
             user_message_id="message_user_2",
             request_hash="b" * 64,
-            provider="offline-director",
+            provider="fixture-director",
             provider_version="1",
         )

@@ -13,6 +13,7 @@ from .ffmpeg import (
     ProjectRenderUnsupported,
 )
 from .provider import ProjectRendererProvider
+from .remotion import ProjectDocRemotionRenderer
 from .repository import (
     RenderArtifactNotFound,
     RenderIdempotencyConflict,
@@ -29,6 +30,7 @@ __all__ = [
     "RenderRequestRejected",
     "RevisionRenderApplication",
     "ProjectDocFFmpegRenderer",
+    "ProjectDocRemotionRenderer",
     "ProjectRendererProvider",
     "ProjectRenderUnsupported",
     "referenced_asset_ids",

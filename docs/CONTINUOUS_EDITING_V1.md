@@ -83,15 +83,21 @@ Exhausting the limit fails the turn; it does not apply a partial edit.
 ## 5. Continuous edit operation subset
 
 The continuous proposal union is deliberately smaller than all of Patch v1.
-It currently permits the existing source, crop, gain, and fade operations plus
-the exact structural operations required for clip-boundary Trim, whole-clip
-Move, and whole-clip Delete:
+It currently permits the existing source, crop, center-reframe, gain, fade,
+caption, and authorized-audio operations plus the exact structural operations
+required for clip-boundary Trim, whole-clip Move, and whole-clip Delete:
 
 - replace a visual source;
 - set visual crop;
+- set center reframe;
 - replace an audio source;
 - set audio gain;
 - set audio fades;
+- set or clear supported speech ducking;
+- add a complete music, voiceover, or SFX track from a ready Asset authorized
+  for that role, or insert a clip into an existing matching audio track;
+- add a complete `caption.clean@1.0.0` track;
+- add, edit, retime, delete, or restyle cues on an existing caption track;
 - delete an existing visual or audio clip;
 - set visual or audio output timing;
 - set constant visual or audio playback;
@@ -111,6 +117,35 @@ Structural edits obey these additional invariants:
   audio clip; the primary visual result must remain gapless.
 - Delete removes the whole named clip and matching source audio, explicitly
   shifts later elements, and updates timeline duration.
+- Replace must use a Moment returned by `search_moments` and then inspected by
+  `inspect_media`. Its asset and selected source subrange are checked against
+  that evidence. A video replacement also replaces matching source audio; an
+  image replacement removes the old source audio.
+- Crop uses normalized source coordinates and does not change timing. Only
+  center Reframe is admitted because face, saliency, and manual Reframe are not
+  yet supported by the FFmpeg renderer.
+- Constant Speed preserves the source range, derives a new output duration
+  from the exact playback equation, applies the same rate/output mapping to
+  matching source audio, and ripples the timeline when duration changes.
+- Gain and Fade remain bounded audio edits. Gain is expressed in dB; fade
+  lengths are integer project frames and cannot exceed the clip duration.
+- New audio clips must use a ready runtime Asset whose ProjectDoc role matches
+  the destination track, and their source range must fit its probed duration.
+  Only music clips may use the implemented `speech` ducking group.
+- New captions use `caption.clean@1.0.0` or an exact published Caption component
+  returned by `search_components` in the same tool trace. New Graphics obey the
+  same exact-version search evidence rule. Component props and integer output
+  frames fail the same ProjectService/renderer preflight as every other
+  capability.
+- A newly introduced Registry component uses a tightly constrained global
+  `set_dependencies` plus its layer operation: existing renderer/Skill/model
+  and component dependencies are immutable, and the new entry must pin the
+  searched bundle digest. The Agent cannot use this operation for unrelated
+  dependency mutation.
+- `create_component_candidate` may produce sandboxed source/bundle/PNG evidence
+  when search finds no fit, but it cannot publish or use that candidate. A user
+  or Reviewer must explicitly publish it before a later Agent turn can search
+  and reference it.
 - Tool Registry rejects a structural visual edit that omits or disagrees with
   an existing matching source-audio operation; audio/video sync is not left to
   prompt compliance.
@@ -125,25 +160,27 @@ Structural edits obey these additional invariants:
   contains a concrete edit action and resolvable target reference. It does not
   use keyword routing, old conversation targets, or the project brief to fill
   missing current intent.
+- The provider receives a deterministic `workspace_grounding` summary that
+  maps the absolute playhead frame to the containing half-open visual interval
+  and matching source-audio IDs. The model still interprets the instruction;
+  it does not calculate timeline identity from tuple order.
 - `propose_patch` runs a no-write ProjectService and renderer dry-run. Scope,
   lock, stale-ID, gap, overlap, media, and renderer errors become persisted
   tool results that the same bounded turn may correct. A rejected proposal is
   never committed.
 
-The offline provider currently executes source-audio gain/mute requests and
-uses Moment search/inspection before honestly returning no change for other
-instructions it cannot safely convert. The shared OpenAI-compatible Director
-adapter supports both Gemini and Volcengine model cards; either can choose any
-registered tool and return any operation in the union. All IDs, scope, locks,
-media authorization, capability checks, and stale-head rules are still
-enforced by ProjectService.
+Runtime continuous editing has no offline Director adapter or keyword/rule
+fallback. The shared OpenAI-compatible Director adapter supports both Gemini
+and Volcengine model cards; either can choose any registered tool and return
+any operation in the union. Missing credentials, invalid structured output,
+exhausted real-model availability, and rejected tool decisions fail the Agent
+Turn and surface its error to the browser while the current Revision remains
+unchanged. Deterministic tests inject explicit scripted fixtures that runtime
+code cannot resolve from the provider registry.
 
-The offline natural-language policy is temporary. Its removal condition is a
-successful live production-Director Continuous Editing golden run plus
-configuration that fails closed when the Director role is not configured.
-After that checkpoint, runtime editing keeps only the formal model/tool path;
-deterministic tests use explicit scripted provider fixtures rather than a
-keyword implementation presented as product behavior.
+All IDs, scope, locks, media authorization, capability checks, and stale-head
+rules are still enforced by ProjectService. Those checks reject unsafe model
+output; they never replace it with a locally authored edit.
 
 For internal demo footage, the Director role may use an ordered list of pinned
 Gemini model cards. `AIVE_ROLE_DIRECTOR_MODEL` names the primary model and
@@ -161,10 +198,10 @@ This chain is therefore restricted to owned/synthetic demo media and is not a
 production privacy policy for customer footage.
 
 Mid-clip removal that requires a new split identity, variable retiming,
-captions, music placement, transitions, graphics, lock editing, and manual
-workspace edits must not be claimed as complete. They are added by extending
-the closed operation union and tests, not with arbitrary JSON Patch or a second
-timeline schema.
+animated or word-timed captions, catalog search/replacement, transitions,
+graphics, lock editing, and manual workspace edits must not be claimed as
+complete. They are added by extending the closed operation union and tests,
+not with arbitrary JSON Patch or a second timeline schema.
 
 ## 6. Commit, rendering, and explanation
 
@@ -204,6 +241,25 @@ historical Revision or a source proxy is never attached to a turn against the
 current Revision. The frozen playhead makes phrases such as “here” and “from
 here” resolvable without making player state authoritative.
 
+Preview Annotation v1 adds a `Preview | Preview edit` mode without creating a
+second timeline. A user pauses or scrubs a ready current-Revision preview,
+marks one frame or a half-open frame range, writes a comment, and attaches that
+reference to the left-side composer. Each `PreviewAnnotation` carries a stable
+annotation ID, exact Revision ID, ready preview Artifact ID, output frame range,
+and comment. The application rejects missing, non-preview, non-ready,
+cross-Revision, and out-of-artifact references before an AgentTurn is queued.
+Accepted annotations are stored inside the durable `WorkspaceSelection`, frozen
+into `AgentTurnContext`, and displayed with the originating user message.
+
+Before model inference, deterministic grounding resolves every annotated range
+to overlapping visual clips, source audio, captions, and graphics. The Director
+may interpret the user's instruction and annotation comment semantically, but
+it cannot turn either into state directly: any resulting edit still requires a
+closed typed Patch, ProjectService validation, a new immutable Revision, and a
+Revision-bound preview. Annotation comments are untrusted user evidence, never
+system instructions. Spatial boxes and freehand pixels are not part of v1;
+v1's reference primitive is exact project time.
+
 `WorkspaceSelection` also defines stable selected target IDs, visible range,
 comparison Revision, and preview inspection frame. Those additional fields
 become active only when the right-side editor exposes real selection state.
@@ -212,10 +268,11 @@ become active only when the right-side editor exposes real selection state.
 
 The remaining Continuous Editing work is:
 
-1. connect real right-side clip/track selection and visible-range state;
-2. remove the runtime offline keyword policy once production Director
-   configuration fails closed; keep explicit scripted providers only in tests;
-3. add replace, crop/reframe, speed, captions, music, transition, graphic, and lock operations
+1. extend Preview Annotation from temporal ranges to optional spatial regions,
+   then connect real right-side clip/track selection and visible-range state;
+2. keep model errors actionable in the browser as providers and prompts evolve;
+3. run a real-model Golden Run for the implemented caption/music operation
+   subset, then add transition, graphic, and lock operations
    one bounded contract slice at a time;
 4. add affected-range preview and a candidate/review gate for high-impact
    edits;
@@ -226,8 +283,10 @@ The remaining Continuous Editing work is:
 
 The live synthetic Golden Run is reproducible with
 `./.venv/bin/python scripts/check_continuous_edit_golden.py`. On 2026-09-26 it
-completed Trim -> Move -> Delete -> clarification in one durable Conversation,
-preserved a four-Revision chain, and generated 6s/5s/5s/3s FFmpeg previews,
-each containing audio and video streams. This qualifies the temporary Gemini
-chain and formal editing path; it does not freeze the final production model or
-qualify investor-demo story footage.
+completed Trim -> Move -> Delete -> Replace -> Crop/Center Reframe -> Constant
+Speed -> Gain/Fade -> clarification in one durable Conversation. It preserved
+eight immutable Revisions and generated 6s/5s/5s/3s/3s/3s/2.5s/2.5s FFmpeg
+previews, each containing audio and video streams. Replace used searched and
+inspected Moment evidence, and Speed preserved source-audio playback mapping.
+This qualifies the temporary Gemini chain and formal editing path; it does not
+freeze the final production model or qualify investor-demo story footage.

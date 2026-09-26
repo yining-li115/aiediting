@@ -5,15 +5,32 @@ from __future__ import annotations
 from hashlib import sha256
 from typing import Mapping
 
+from ..contracts.captions import (
+    CLEAN_CAPTION_COMPONENT,
+    CLEAN_CAPTION_VERSION,
+    default_caption_style,
+)
 from ..contracts.director import AgentRunContext, FirstCutDecision
 from ..contracts.moments import MomentEvidence
 from ..contracts.patch import Patch, PatchScope
-from ..contracts.patch_project import AddTrack, SetCreativePlan, SetTimelineDuration
-from ..contracts.project_doc import CreativePlan, PlanSection, ProjectDoc
+from ..contracts.patch_project import (
+    AddTrack,
+    SetCreativePlan,
+    SetDependencies,
+    SetTimelineDuration,
+)
+from ..contracts.project_doc import (
+    CreativePlan,
+    DependencyRef,
+    PlanSection,
+    ProjectDoc,
+)
 from ..contracts.time import FrameRange, SourceRange
 from ..contracts.timeline import (
     AudioClip,
     AudioTrack,
+    CaptionCue,
+    CaptionTrack,
     ImageClip,
     VideoClip,
     VideoTrack,
@@ -42,6 +59,7 @@ def build_first_cut_explanation(
         for moment in selected
         if (asset := assets.get(moment.asset_id)) is not None and asset.has_audio
     )
+    caption_count = sum(1 for moment in selected if moment.asr_text)
     parts = [
         f"Selected {len(selected)} analyzed Moment(s) from {asset_count} source Asset(s).",
         f"Creative direction: {decision.creative_strategy.objective}",
@@ -51,12 +69,25 @@ def build_first_cut_explanation(
     if decision.copy_strategy.title:
         parts.append(f"Draft title: {decision.copy_strategy.title}")
     if decision.copy_strategy.caption_mode != "none":
+        if caption_count:
+            parts.append(
+                f"Applied {caption_count} {decision.copy_strategy.caption_mode} "
+                "caption cue(s) from ASR evidence."
+            )
+        else:
+            parts.append("No caption track was added because no selected Moment had ASR text.")
+    if decision.music_strategy.mode == "music_bed":
         parts.append(
-            "Prepared a "
-            f"{decision.copy_strategy.caption_mode} caption strategy; caption rendering "
-            "is not applied by the current preview renderer."
+            f"Added authorized music Asset {decision.music_strategy.asset_id} with "
+            f"{decision.music_strategy.gain_db:g} dB gain"
+            + (
+                " and speech ducking."
+                if decision.music_strategy.duck_under_speech
+                else "."
+            )
         )
-    parts.append(f"Audio strategy: {decision.music_strategy.mode}.")
+    else:
+        parts.append(f"Audio strategy: {decision.music_strategy.mode}.")
     return " ".join(parts)[:4_000]
 
 
@@ -68,6 +99,7 @@ def build_first_cut_patch(
     run_id: str,
     request_id: str,
     asset_has_audio: Mapping[str, bool],
+    asset_duration_seconds: Mapping[str, float] | None = None,
     candidate_attempt: int = 0,
 ) -> Patch:
     """Build one executable, gapless first-cut Patch from selected Moments."""
@@ -91,6 +123,8 @@ def build_first_cut_patch(
     cursor = 0
     visual_clips: list[VideoClip | ImageClip] = []
     audio_clips: list[AudioClip] = []
+    caption_cues: list[CaptionCue] = []
+    has_speech_audio = False
     sections: list[PlanSection] = []
 
     for ordinal, moment_id in enumerate(decision.moment_ids):
@@ -139,6 +173,21 @@ def build_first_cut_patch(
                         asset_id=asset.asset_id,
                         source=source,
                         output=output,
+                    )
+                )
+                has_speech_audio = has_speech_audio or moment.has_speech
+            if (
+                decision.copy_strategy.caption_mode != "none"
+                and moment.asr_text
+            ):
+                caption_cues.append(
+                    CaptionCue(
+                        cue_id=_stable_id(
+                            "caption", identity_seed, moment_id, str(ordinal)
+                        ),
+                        output=output,
+                        text=moment.asr_text[:4_000],
+                        source="asr",
                     )
                 )
         elif asset.kind == "photo":
@@ -194,6 +243,72 @@ def build_first_cut_patch(
                     track_id=_stable_id("track", identity_seed, "source-audio"),
                     role="source",
                     clips=tuple(audio_clips),
+                ),
+            )
+        )
+    if caption_cues:
+        components = document.dependencies.components
+        caption_dependency = DependencyRef(
+            name=CLEAN_CAPTION_COMPONENT,
+            version=CLEAN_CAPTION_VERSION,
+        )
+        if caption_dependency not in components:
+            operations.append(
+                SetDependencies(
+                    operation_id=_stable_id(
+                        "op", identity_seed, "install-caption-component"
+                    ),
+                    dependencies=document.dependencies.model_copy(
+                        update={"components": components + (caption_dependency,)}
+                    ),
+                )
+            )
+        operations.append(
+            AddTrack(
+                operation_id=_stable_id("op", identity_seed, "add-captions"),
+                track=CaptionTrack(
+                    track_id=_stable_id("track", identity_seed, "captions"),
+                    style=default_caption_style(
+                        _stable_id("caption-style", identity_seed, "clean")
+                    ),
+                    cues=tuple(caption_cues),
+                ),
+            )
+        )
+    if decision.music_strategy.mode == "music_bed":
+        durations = asset_duration_seconds or {}
+        music_asset_id = decision.music_strategy.asset_id
+        music_asset = by_asset.get(music_asset_id or "")
+        if music_asset is None or "music" not in music_asset.roles:
+            raise FirstCutBuildError(
+                "music-bed strategy requires the selected authorized music Asset"
+            )
+        if not asset_has_audio.get(music_asset.asset_id, False):
+            raise FirstCutBuildError("selected music Asset has no audio stream")
+        music_duration = durations.get(music_asset.asset_id)
+        if music_duration is None or music_duration <= 0:
+            raise FirstCutBuildError("selected music Asset has no usable duration")
+        music_clips = _music_bed_clips(
+            identity_seed=identity_seed,
+            asset_id=music_asset.asset_id,
+            asset_duration_seconds=music_duration,
+            timeline_duration_frames=cursor,
+            fps_num=fps.num,
+            fps_den=fps.den,
+            gain_db=decision.music_strategy.gain_db,
+            fade_in_frames=decision.music_strategy.fade_in_frames,
+            fade_out_frames=decision.music_strategy.fade_out_frames,
+            duck_under_speech=(
+                decision.music_strategy.duck_under_speech and has_speech_audio
+            ),
+        )
+        operations.append(
+            AddTrack(
+                operation_id=_stable_id("op", identity_seed, "add-music"),
+                track=AudioTrack(
+                    track_id=_stable_id("track", identity_seed, "music"),
+                    role="music",
+                    clips=music_clips,
                 ),
             )
         )
@@ -265,3 +380,53 @@ def _creative_plan_summary(decision: FirstCutDecision) -> str:
     parts.append(f"Caption strategy: {decision.copy_strategy.caption_mode}.")
     parts.append(f"Music strategy: {decision.music_strategy.mode}.")
     return " ".join(parts)[:4_000]
+
+
+def _music_bed_clips(
+    *,
+    identity_seed: str,
+    asset_id: str,
+    asset_duration_seconds: float,
+    timeline_duration_frames: int,
+    fps_num: int,
+    fps_den: int,
+    gain_db: float,
+    fade_in_frames: int,
+    fade_out_frames: int,
+    duck_under_speech: bool,
+) -> tuple[AudioClip, ...]:
+    available_frames = int(asset_duration_seconds * fps_num / fps_den)
+    if available_frames <= 0:
+        raise FirstCutBuildError("selected music Asset is shorter than one frame")
+    clips: list[AudioClip] = []
+    cursor = 0
+    ordinal = 0
+    while cursor < timeline_duration_frames:
+        duration = min(available_frames, timeline_duration_frames - cursor)
+        clips.append(
+            AudioClip(
+                clip_id=_stable_id(
+                    "music", identity_seed, asset_id, str(ordinal)
+                ),
+                asset_id=asset_id,
+                source=SourceRange(
+                    start=0,
+                    end=duration * fps_den,
+                    timescale=fps_num,
+                ),
+                output=FrameRange(start_frame=cursor, duration_frames=duration),
+                gain_db=gain_db,
+                fade_in_frames=min(fade_in_frames, duration) if ordinal == 0 else 0,
+                fade_out_frames=0,
+                ducking_group="speech" if duck_under_speech else None,
+            )
+        )
+        cursor += duration
+        ordinal += 1
+    last = clips[-1]
+    clips[-1] = last.model_copy(
+        update={
+            "fade_out_frames": min(fade_out_frames, last.output.duration_frames)
+        }
+    )
+    return tuple(clips)

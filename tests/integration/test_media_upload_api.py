@@ -25,7 +25,6 @@ from apps.api.routes.renders import get_revision_render_application
 from aive.agent import (
     DirectorApplication,
     FirstCutWorkflow,
-    OfflineDirectorProvider,
     RenderReviewApplication,
     VideoAgentHarness,
 )
@@ -44,6 +43,7 @@ from aive.project.service import CapabilityUse
 from aive.rendering import ProjectDocFFmpegRenderer, RevisionRenderApplication
 from aive.storage import LocalStorage
 from tests.conftest import requires_ffmpeg
+from tests.provider_fakes import FixtureFirstCutDirectorProvider
 
 
 class AcceptCapabilities:
@@ -102,7 +102,7 @@ def media_api(tmp_path):
             "job": "job_render_first_cut_media",
         }[prefix],
     )
-    harness = VideoAgentHarness(provider=OfflineDirectorProvider())
+    harness = VideoAgentHarness(provider=FixtureFirstCutDirectorProvider())
     director = DirectorApplication(
         runs=SqlAlchemyDirectorRunRepository(sessions),
         projects=projects,

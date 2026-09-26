@@ -7,7 +7,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from aive.agent.harness import VideoAgentHarness
-from aive.agent.provider import OfflineDirectorProvider
 from aive.agent.render_review import (
     OfflineRenderReviewerProvider,
     RenderReviewEngine,
@@ -29,6 +28,7 @@ from aive.db.render_repository import SqlAlchemyRenderRepository
 from aive.jobs import JobRunner
 from aive.project.hashing import canonical_model_hash
 from aive.storage import LocalStorage
+from tests.provider_fakes import FixtureFirstCutDirectorProvider
 
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -128,7 +128,7 @@ def test_render_review_application_persists_context_and_report(tmp_path) -> None
         render_time_ms=1,
     )
     harness = VideoAgentHarness(
-        provider=OfflineDirectorProvider(),
+        provider=FixtureFirstCutDirectorProvider(),
         render_review_engine=RenderReviewEngine(
             inspector=FakeInspector(),
             provider=OfflineRenderReviewerProvider(),

@@ -10,7 +10,13 @@ from typing import Literal, Protocol
 
 from ..contracts.media import AssetProcessingStatus
 from ..jobs import Stage
-from ..material.probe import make_photo_proxy, make_proxy, make_thumbnail
+from ..material.probe import (
+    make_audio_proxy,
+    make_audio_thumbnail,
+    make_photo_proxy,
+    make_proxy,
+    make_thumbnail,
+)
 from ..specs.base import new_id
 from ..specs.segment import Asset
 from ..storage import PROXY, THUMBNAIL, StorageProvider, project_key
@@ -72,6 +78,8 @@ def _generate_proxy(
     source: Path,
     output: Path,
 ) -> Path:
+    if record.kind == "audio":
+        return make_audio_proxy(source, output)
     asset = _legacy_asset(record)
     if record.kind == "photo":
         return make_photo_proxy(asset, source, output)
@@ -83,6 +91,8 @@ def _generate_thumbnail(
     source: Path,
     output: Path,
 ) -> Path:
+    if record.kind == "audio":
+        return make_audio_thumbnail(source, output)
     return make_thumbnail(_legacy_asset(record), source, output)
 
 
@@ -158,8 +168,20 @@ class MediaProcessingApplication:
             )
         return MediaArtifactDelivery(
             path=path,
-            content_type=("image/jpeg" if record.kind == "photo" else "video/mp4"),
-            filename=f"{asset_id}{'.jpg' if record.kind == 'photo' else '.mp4'}",
+            content_type=(
+                "image/jpeg"
+                if record.kind == "photo"
+                else "audio/mp4"
+                if record.kind == "audio"
+                else "video/mp4"
+            ),
+            filename=(
+                f"{asset_id}.jpg"
+                if record.kind == "photo"
+                else f"{asset_id}.m4a"
+                if record.kind == "audio"
+                else f"{asset_id}.mp4"
+            ),
         )
 
     def job_targets(self, job_id: str) -> tuple[str, tuple[str, ...]]:
@@ -248,7 +270,13 @@ class MediaProcessingApplication:
         self,
         record: AssetProcessingRecord,
     ) -> str:
-        proxy_suffix = ".jpg" if record.kind == "photo" else ".mp4"
+        proxy_suffix = (
+            ".jpg"
+            if record.kind == "photo"
+            else ".m4a"
+            if record.kind == "audio"
+            else ".mp4"
+        )
         proxy_key = project_key(
             record.project_id,
             PROXY,

@@ -59,6 +59,8 @@ class ProjectIntent(ContractModel):
     prompt: str | None = Field(default=None, max_length=8_000)
     explicit_requirements: tuple[str, ...] = ()
     style_tags: tuple[str, ...] = ()
+    caption_policy: Literal["director", "none", "auto"] = "director"
+    music_policy: Literal["director", "none", "auto"] = "director"
 
 
 class AssetRef(ContractModel):
@@ -185,6 +187,7 @@ class ProjectDoc(ContractModel):
         self._validate_locks(tracks, elements, sections)
         self._validate_reference(assets, elements)
         self._validate_dependency_names()
+        self._validate_component_dependencies()
         return self
 
     @staticmethod
@@ -333,6 +336,35 @@ class ProjectDoc(ContractModel):
             names = [dependency.name for dependency in dependencies]
             if len(names) != len(set(names)):
                 raise ValueError(f"duplicate {label} dependency name")
+
+    def _validate_component_dependencies(self) -> None:
+        declared = {
+            dependency.name: dependency.version
+            for dependency in self.dependencies.components
+        }
+        required: set[tuple[str, str]] = set()
+        for track in self.timeline.tracks:
+            if isinstance(track, CaptionTrack):
+                required.add(
+                    (track.style.component_name, track.style.component_version)
+                )
+            elif isinstance(track, GraphicTrack):
+                required.update(
+                    (graphic.component_name, graphic.component_version)
+                    for graphic in track.graphics
+                )
+        for name, version in sorted(required):
+            declared_version = declared.get(name)
+            if declared_version is None:
+                raise ValueError(
+                    f"timeline component {name!r}@{version} is missing from "
+                    "dependencies.components"
+                )
+            if declared_version != version:
+                raise ValueError(
+                    f"timeline component {name!r}@{version} disagrees with "
+                    f"dependency version {declared_version!r}"
+                )
 
 
 __all__ = [

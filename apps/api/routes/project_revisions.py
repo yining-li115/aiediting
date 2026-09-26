@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from aive.components import RegisteredCapabilityValidator
 from aive.contracts.patch import Patch
 from aive.contracts.revision import ProjectRevision, RestoreRevisionRequest
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.session import get_session_factory
 from aive.project.application import ProjectRevisionApplication
-from aive.project.capabilities import UnconfiguredCapabilityValidator
 
+from ..component_dependencies import get_component_registry, get_component_runtime
 from ..schemas import RevisionMutationResponse
 
 
@@ -22,7 +23,11 @@ def get_project_revision_application() -> ProjectRevisionApplication:
     sessions = get_session_factory()
     return ProjectRevisionApplication(
         SqlAlchemyRevisionRepository(sessions),
-        UnconfiguredCapabilityValidator(),
+        RegisteredCapabilityValidator(
+            get_component_registry(),
+            supported_usages=frozenset({"caption", "graphic"}),
+            runtime=get_component_runtime(),
+        ),
         asset_authorizer=SqlAlchemyMediaAssetRepository(sessions),
     )
 

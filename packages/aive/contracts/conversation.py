@@ -8,22 +8,46 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .base import ContractModel, StableId
+from .components import (
+    ComponentCandidate,
+    ComponentSearchQuery,
+    CreateComponentCandidateRequest,
+    PublishedComponent,
+)
+from .director import AgentAssetContext
 from .media import DatabaseId
 from .moments import MomentEvidence
 from .patch import Patch, PatchScope
-from .patch_project import SetCreativePlan, SetTimelineDuration
+from .patch_project import (
+    AddTrack,
+    SetCreativePlan,
+    SetDependencies,
+    SetTimelineDuration,
+)
 from .patch_timeline import (
+    AddCaption,
+    AddGraphic,
+    DeleteCaption,
     DeleteAudioClip,
+    DeleteGraphic,
     DeleteVisualClip,
+    InsertAudioClip,
     ReplaceAudioSource,
     ReplaceVisualSource,
+    SetAudioDucking,
     SetAudioFades,
     SetAudioGain,
     SetAudioOutput,
     SetAudioPlayback,
+    SetCaptionOutput,
+    SetCaptionStyle,
+    SetGraphicOutput,
     SetVideoPlayback,
     SetVisualCrop,
     SetVisualOutput,
+    SetVisualReframe,
+    UpdateCaptionText,
+    UpdateGraphicProps,
 )
 from .project_doc import ProjectDoc
 from .time import FrameRange
@@ -36,6 +60,8 @@ AgentToolName = Literal[
     "read_project",
     "search_moments",
     "inspect_media",
+    "search_components",
+    "create_component_candidate",
     "propose_patch",
 ]
 
@@ -47,6 +73,22 @@ class CreateConversationRequest(ContractModel):
     purpose: ConversationPurpose = "primary"
 
 
+class PreviewAnnotation(ContractModel):
+    """A user-authored comment on an exact interval of one rendered Revision."""
+
+    annotation_id: StableId
+    revision_id: StableId
+    artifact_id: StableId
+    output_range: FrameRange
+    comment: str = Field(min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def comment_has_content(self) -> PreviewAnnotation:
+        if not self.comment.strip():
+            raise ValueError("preview annotation comment must contain text")
+        return self
+
+
 class WorkspaceSelection(ContractModel):
     """Transient right-side workspace state supplied with one user turn."""
 
@@ -56,11 +98,25 @@ class WorkspaceSelection(ContractModel):
     visible_range: FrameRange | None = None
     comparison_revision_id: StableId | None = None
     preview_frame: int | None = Field(default=None, ge=0)
+    preview_annotations: tuple[PreviewAnnotation, ...] = Field(
+        default=(),
+        max_length=8,
+    )
 
     @model_validator(mode="after")
     def target_ids_are_unique(self) -> WorkspaceSelection:
         if len(self.selected_target_ids) != len(set(self.selected_target_ids)):
             raise ValueError("workspace selection contains duplicate target IDs")
+        annotation_ids = [
+            annotation.annotation_id for annotation in self.preview_annotations
+        ]
+        if len(annotation_ids) != len(set(annotation_ids)):
+            raise ValueError("workspace contains a duplicate preview annotation ID")
+        if any(
+            annotation.revision_id != self.revision_id
+            for annotation in self.preview_annotations
+        ):
+            raise ValueError("preview annotation revision must equal workspace revision")
         return self
 
 
@@ -90,6 +146,7 @@ class ConversationMessage(ContractModel):
     agent_turn_id: StableId | None = None
     base_revision_id: StableId | None = None
     result_revision_id: StableId | None = None
+    workspace: WorkspaceSelection | None = None
     created_at: datetime
 
 
@@ -122,6 +179,7 @@ class AgentTurnContext(ContractModel):
     )
     instruction: str = Field(min_length=1, max_length=8_000)
     document: ProjectDoc
+    assets: tuple[AgentAssetContext, ...] = ()
     moments: tuple[MomentEvidence, ...] = ()
     conversation_history: tuple[ConversationMessage, ...] = Field(
         default=(),
@@ -142,9 +200,14 @@ class AgentTurnContext(ContractModel):
             raise ValueError("Agent turn workspace is not bound to the base revision")
         if len(self.allowed_tools) != len(set(self.allowed_tools)):
             raise ValueError("Agent turn contains duplicate allowed tools")
+        asset_ids = {asset.asset_id for asset in self.assets}
+        if len(asset_ids) != len(self.assets):
+            raise ValueError("Agent turn contains duplicate runtime Assets")
         for moment in self.moments:
             if moment.project_id != self.project_id:
                 raise ValueError("Agent turn contains a cross-project Moment")
+            if self.assets and moment.asset_id not in asset_ids:
+                raise ValueError("Agent turn Moment references an unknown runtime Asset")
         for message in self.conversation_history:
             if (
                 message.project_id != self.project_id
@@ -170,19 +233,33 @@ class MomentSearchHit(ContractModel):
 
 
 ContinuousEditOperation = Annotated[
-    SetCreativePlan
+    AddTrack
+    | SetCreativePlan
+    | SetDependencies
     | SetTimelineDuration
     | DeleteVisualClip
     | ReplaceVisualSource
     | SetVisualOutput
     | SetVideoPlayback
     | SetVisualCrop
+    | SetVisualReframe
     | DeleteAudioClip
     | ReplaceAudioSource
     | SetAudioOutput
     | SetAudioPlayback
     | SetAudioGain
-    | SetAudioFades,
+    | SetAudioFades
+    | SetAudioDucking
+    | InsertAudioClip
+    | AddCaption
+    | UpdateCaptionText
+    | SetCaptionOutput
+    | DeleteCaption
+    | SetCaptionStyle
+    | AddGraphic
+    | SetGraphicOutput
+    | UpdateGraphicProps
+    | DeleteGraphic,
     Field(discriminator="op"),
 ]
 
@@ -210,6 +287,18 @@ class InspectMediaCall(ContractModel):
         return self
 
 
+class SearchComponentsCall(ContractModel):
+    tool: Literal["search_components"] = "search_components"
+    call_id: StableId
+    query: ComponentSearchQuery
+
+
+class CreateComponentCandidateCall(ContractModel):
+    tool: Literal["create_component_candidate"] = "create_component_candidate"
+    call_id: StableId
+    request: CreateComponentCandidateRequest
+
+
 class PatchProposal(ContractModel):
     summary: str = Field(min_length=1, max_length=1_000)
     rationale: str = Field(min_length=1, max_length=2_000)
@@ -234,7 +323,12 @@ class ProposePatchCall(ContractModel):
 
 
 AgentToolCall = Annotated[
-    ReadProjectCall | SearchMomentsCall | InspectMediaCall | ProposePatchCall,
+    ReadProjectCall
+    | SearchMomentsCall
+    | InspectMediaCall
+    | SearchComponentsCall
+    | CreateComponentCandidateCall
+    | ProposePatchCall,
     Field(discriminator="tool"),
 ]
 
@@ -247,6 +341,8 @@ class AgentToolResult(ContractModel):
     document: ProjectDoc | None = None
     hits: tuple[MomentSearchHit, ...] | None = None
     moments: tuple[MomentEvidence, ...] | None = None
+    components: tuple[PublishedComponent, ...] | None = None
+    component_candidate: ComponentCandidate | None = None
     proposal: PatchProposal | None = None
     error: str | None = Field(default=None, min_length=1, max_length=1_000)
 
@@ -256,6 +352,8 @@ class AgentToolResult(ContractModel):
             "read_project": self.document,
             "search_moments": self.hits,
             "inspect_media": self.moments,
+            "search_components": self.components,
+            "create_component_candidate": self.component_candidate,
             "propose_patch": self.proposal,
         }
         if self.error is not None:
@@ -354,6 +452,7 @@ __all__ = [
     "ConversationRole",
     "ConversationTicket",
     "ContinuousEditOperation",
+    "CreateComponentCandidateCall",
     "CreateAgentTurnRequest",
     "CreateConversationRequest",
     "InspectMediaCall",
@@ -363,5 +462,6 @@ __all__ = [
     "ProposePatchCall",
     "ReadProjectCall",
     "SearchMomentsCall",
+    "SearchComponentsCall",
     "WorkspaceSelection",
 ]

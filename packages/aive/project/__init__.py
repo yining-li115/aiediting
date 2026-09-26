@@ -34,6 +34,7 @@ from .application import (
     RevisionNotFound,
 )
 from .capabilities import (
+    DefaultCapabilityValidator,
     PreserveCommittedCapabilities,
     UnconfiguredCapabilityValidator,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "AssetAuthorizer",
     "ProjectNotInitialized",
     "ProjectRevisionApplication",
+    "DefaultCapabilityValidator",
     "PreserveCommittedCapabilities",
     "RevisionNotFound",
     "UnconfiguredCapabilityValidator",

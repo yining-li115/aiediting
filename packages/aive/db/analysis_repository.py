@@ -60,7 +60,16 @@ class SqlAlchemyMediaAnalysisRepository:
                 raise ProjectAssetNotFound(
                     f"assets {missing!r} are not registered to project {project_id!r}"
                 )
-            ordered = tuple(by_id[asset_id] for asset_id in ordered_ids)
+            # Audio-only music/voiceover/SFX Assets are already ready for the
+            # renderer after media processing. Shot/Moment analysis is visual
+            # and must not fail the whole upload batch for those files.
+            ordered = tuple(
+                by_id[asset_id]
+                for asset_id in ordered_ids
+                if by_id[asset_id].kind != "audio"
+            )
+            if not ordered:
+                return MediaAnalysisTicket(job_id=None, asset_ids=(), created=False)
             not_ready = tuple(row.id for row in ordered if row.readiness != "ready")
             if not_ready:
                 raise MediaAnalysisConflict(

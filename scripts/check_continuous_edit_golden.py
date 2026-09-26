@@ -174,7 +174,7 @@ def _initial_document() -> ProjectDoc:
         ),
         assets=tuple(
             AssetRef(asset_id=f"asset_{index}", kind="video")
-            for index in range(1, 4)
+            for index in range(1, 5)
         ),
         timeline=Timeline(
             duration_frames=180,
@@ -209,6 +209,7 @@ def _build_stack(workdir: Path, costs: list[CostRecord]) -> GoldenStack:
         (1, "red", 330, "Opening red shot"),
         (2, "green", 550, "Middle green shot"),
         (3, "blue", 770, "Closing blue shot"),
+        (4, "yellow", 990, "Bright yellow replacement close-up"),
     )
     stored: dict[int, tuple[str, int, str]] = {}
     for index, color, frequency, _ in sources:
@@ -370,6 +371,19 @@ def _assert_audio_video_sync(document: ProjectDoc) -> None:
         assert start == cursor, "primary video track contains a gap or overlap"
         cursor += duration
     assert cursor == state["duration_frames"], "timeline duration is not closed"
+    video_track = next(
+        track for track in document.timeline.tracks if track.kind == "video"
+    )
+    audio_track = next(
+        track for track in document.timeline.tracks if track.kind == "audio"
+    )
+    audio_by_id = {clip.clip_id: clip for clip in audio_track.clips}
+    for visual in video_track.clips:
+        index = visual.clip_id.removeprefix("clip_visual_")
+        matching = audio_by_id[f"clip_audio_{index}"]
+        assert matching.playback == visual.playback, (
+            f"audio playback diverged for {visual.clip_id}"
+        )
 
 
 def _probe_streams(path: Path) -> set[str]:
@@ -475,19 +489,25 @@ def _assert_state(document: ProjectDoc, expected: dict[str, Any]) -> None:
 
 def _paired_expected(
     duration_frames: int,
-    items: tuple[tuple[int, int, int, int], ...],
+    items: tuple[tuple[int, int, int, int, int, int], ...],
 ) -> dict[str, Any]:
     video: dict[str, Any] = {}
     audio: dict[str, Any] = {}
-    for index, source_start, source_end, output_start in items:
-        duration = round((source_end - source_start) * FPS / 1_000)
+    for (
+        clip_index,
+        asset_index,
+        source_start,
+        source_end,
+        output_start,
+        output_duration,
+    ) in items:
         value = {
-            "asset": f"asset_{index}",
+            "asset": f"asset_{asset_index}",
             "source": (source_start, source_end),
-            "output": (output_start, duration),
+            "output": (output_start, output_duration),
         }
-        video[f"clip_visual_{index}"] = value
-        audio[f"clip_audio_{index}"] = value
+        video[f"clip_visual_{clip_index}"] = value
+        audio[f"clip_audio_{clip_index}"] = value
     return {
         "duration_frames": duration_frames,
         "video": video,
@@ -530,7 +550,11 @@ async def _golden_run(workdir: Path) -> dict[str, Any]:
                 "playhead": 75,
                 "expected": _paired_expected(
                     150,
-                    ((1, 0, 2_000, 0), (2, 0, 1_000, 60), (3, 0, 2_000, 90)),
+                    (
+                        (1, 1, 0, 2_000, 0, 60),
+                        (2, 2, 0, 1_000, 60, 30),
+                        (3, 3, 0, 2_000, 90, 60),
+                    ),
                 ),
             },
             {
@@ -542,7 +566,11 @@ async def _golden_run(workdir: Path) -> dict[str, Any]:
                 "playhead": None,
                 "expected": _paired_expected(
                     150,
-                    ((3, 0, 2_000, 0), (1, 0, 2_000, 60), (2, 0, 1_000, 120)),
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (1, 1, 0, 2_000, 60, 60),
+                        (2, 2, 0, 1_000, 120, 30),
+                    ),
                 ),
             },
             {
@@ -554,7 +582,73 @@ async def _golden_run(workdir: Path) -> dict[str, Any]:
                 "playhead": 75,
                 "expected": _paired_expected(
                     90,
-                    ((3, 0, 2_000, 0), (2, 0, 1_000, 60)),
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (2, 2, 0, 1_000, 60, 30),
+                    ),
+                ),
+            },
+            {
+                "name": "replace",
+                "instruction": (
+                    "用素材库中语义为 ‘Bright yellow replacement close-up’ 的 Moment "
+                    "替换播放位置所在镜头。先搜索并检查该 Moment，保留当前镜头的 30 帧"
+                    "输出位置和长度，使用该 Moment 开始处的 1000 ticks，并同步替换为新"
+                    "素材的原声。"
+                ),
+                "playhead": 75,
+                "expected": _paired_expected(
+                    90,
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (2, 4, 0, 1_000, 60, 30),
+                    ),
+                ),
+            },
+            {
+                "name": "crop_reframe",
+                "instruction": (
+                    "把播放位置所在镜头裁剪为归一化 x=0.1、y=0.1、width=0.8、"
+                    "height=0.8，并设置为 center reframe；不要改变镜头时长、位置或原声。"
+                ),
+                "playhead": 75,
+                "expected": _paired_expected(
+                    90,
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (2, 4, 0, 1_000, 60, 30),
+                    ),
+                ),
+            },
+            {
+                "name": "speed",
+                "instruction": (
+                    "把播放位置所在镜头及其原声设为恒定 2 倍速，保留完整 source range，"
+                    "把它的输出时长从 30 帧改为 15 帧，并把总时间轴从 90 帧收紧为 75 帧；"
+                    "保持音画同步。"
+                ),
+                "playhead": 75,
+                "expected": _paired_expected(
+                    75,
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (2, 4, 0, 1_000, 60, 15),
+                    ),
+                ),
+            },
+            {
+                "name": "gain_fade",
+                "instruction": (
+                    "把播放位置所在镜头对应的原声设为 -6 dB，并设置淡入 3 帧、淡出 3 帧；"
+                    "不要改变画面、播放速度或时间轴长度。"
+                ),
+                "playhead": 65,
+                "expected": _paired_expected(
+                    75,
+                    (
+                        (3, 3, 0, 2_000, 0, 60),
+                        (2, 4, 0, 1_000, 60, 15),
+                    ),
                 ),
             },
         )
@@ -575,6 +669,48 @@ async def _golden_run(workdir: Path) -> dict[str, Any]:
             assert current.document.revision_id == turn.result_revision_id
             assert current.document.parent_revision_id == prior_revision_id
             _assert_state(current.document, scenario["expected"])
+            video_track = next(
+                track
+                for track in current.document.timeline.tracks
+                if track.kind == "video"
+            )
+            audio_track = next(
+                track
+                for track in current.document.timeline.tracks
+                if track.kind == "audio"
+            )
+            video_by_id = {clip.clip_id: clip for clip in video_track.clips}
+            audio_by_id = {clip.clip_id: clip for clip in audio_track.clips}
+            if scenario["name"] == "replace":
+                assert "search_moments" in [step.call.tool for step in turn.steps]
+                assert "inspect_media" in [step.call.tool for step in turn.steps]
+                assert video_by_id["clip_visual_2"].asset_id == "asset_4"
+                assert audio_by_id["clip_audio_2"].asset_id == "asset_4"
+            elif scenario["name"] == "crop_reframe":
+                crop = video_by_id["clip_visual_2"].crop
+                reframe = video_by_id["clip_visual_2"].reframe
+                assert crop is not None
+                assert (crop.x, crop.y, crop.width, crop.height) == (
+                    0.1,
+                    0.1,
+                    0.8,
+                    0.8,
+                )
+                assert reframe is not None and reframe.mode == "center"
+            elif scenario["name"] == "speed":
+                assert video_by_id["clip_visual_2"].playback.rate == Rational(
+                    num=2,
+                    den=1,
+                )
+                assert audio_by_id["clip_audio_2"].playback.rate == Rational(
+                    num=2,
+                    den=1,
+                )
+            elif scenario["name"] == "gain_fade":
+                audio = audio_by_id["clip_audio_2"]
+                assert audio.gain_db == -6
+                assert audio.fade_in_frames == 3
+                assert audio.fade_out_frames == 3
             preview = _assert_preview(stack, turn, current.document.revision_id)
             revision_ids.append(current.document.revision_id)
             report["steps"].append(
@@ -631,7 +767,7 @@ async def _golden_run(workdir: Path) -> dict[str, Any]:
         history_ids = [revision.document.revision_id for revision in history]
         # The fixture seeds its initial immutable row directly, without a
         # commit-attempt row.  Revision history intentionally lists committed
-        # attempts, so it contains the three Agent commits; the initial row is
+        # attempts, so it contains the Agent commits; the initial row is
         # verified explicitly with get_revision below.
         assert history_ids == revision_ids[1:], (
             f"committed history {history_ids!r} != Agent revisions "

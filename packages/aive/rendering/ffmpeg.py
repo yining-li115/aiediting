@@ -16,11 +16,14 @@ from fractions import Fraction
 from pathlib import Path
 
 from ..config import settings
+from ..contracts.captions import clean_caption_parameters
 from ..contracts.project_doc import ProjectDoc
 from ..contracts.time import ConstantPlayback, FrameRange
 from ..contracts.timeline import (
     AudioClip,
     AudioTrack,
+    CaptionCue,
+    CaptionStyle,
     CaptionTrack,
     GraphicTrack,
     ImageClip,
@@ -30,6 +33,7 @@ from ..contracts.timeline import (
 from ..renderer.base import RenderResult
 from ..renderer.ffmpeg import FFmpegError, _run, has_audio_stream, probe_duration
 from ..renderer.profiles import Quality
+from .captions import CaptionRasterError, rasterize_clean_caption
 
 
 class ProjectRenderUnsupported(FFmpegError):
@@ -48,11 +52,20 @@ class _VisualSlice:
 @dataclass(frozen=True)
 class _AudioSlice:
     clip: AudioClip
+    track_role: str
     start_frame: int
     duration_frames: int
     clip_head_frames: int
     source_start_seconds: Fraction
     source_duration_seconds: Fraction
+
+
+@dataclass(frozen=True)
+class _CaptionSlice:
+    cue: CaptionCue
+    style: CaptionStyle
+    start_frame: int
+    duration_frames: int
 
 
 @dataclass(frozen=True)
@@ -73,7 +86,7 @@ class ProjectDocFFmpegRenderer:
     """Deterministic cuts-and-audio renderer for ProjectDoc v1."""
 
     name = "ffmpeg-project-doc"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self, keep_intermediates: bool = False) -> None:
         self.keep_intermediates = keep_intermediates
@@ -86,7 +99,9 @@ class ProjectDocFFmpegRenderer:
         render_range = _render_range(document, output_range)
         _reject_unsupported_layers(document, render_range)
         _visual_slices(document, render_range)
-        _audio_slices(document, render_range)
+        audio = _audio_slices(document, render_range)
+        _caption_slices(document, render_range)
+        _validate_ducking(audio)
 
     def render(
         self,
@@ -101,6 +116,8 @@ class ProjectDocFFmpegRenderer:
         _reject_unsupported_layers(document, render_range)
         visuals = _visual_slices(document, render_range)
         audio = _audio_slices(document, render_range)
+        captions = _caption_slices(document, render_range)
+        _validate_ducking(audio)
         _validate_sources(visuals, audio, sources)
 
         profile = _profile(document, quality)
@@ -141,9 +158,37 @@ class ProjectDocFFmpegRenderer:
                     str(silent_video),
                 ]
             )
+            picture = silent_video
+            if captions:
+                captioned_video = workdir / "captioned-picture.mp4"
+                overlays = []
+                scale = profile.width / document.timeline.output.width
+                for index, item in enumerate(captions):
+                    try:
+                        overlay = rasterize_clean_caption(
+                            text=item.cue.text,
+                            parameters=clean_caption_parameters(item.style),
+                            width=profile.width,
+                            height=profile.height,
+                            scale=scale,
+                            output=workdir / f"caption_{index:04d}.png",
+                        )
+                    except (CaptionRasterError, ValueError) as exc:
+                        raise ProjectRenderUnsupported(str(exc)) from exc
+                    overlays.append((item, overlay))
+                _run(
+                    _caption_overlay_command(
+                        silent_video,
+                        tuple(overlays),
+                        captioned_video,
+                        profile,
+                        render_range.duration_frames,
+                    )
+                )
+                picture = captioned_video
             _run(
                 _audio_mux_command(
-                    silent_video,
+                    picture,
                     audio,
                     sources,
                     out_path,
@@ -231,14 +276,20 @@ def _reject_unsupported_layers(
                     raise ProjectRenderUnsupported(
                         f"audio clip {clip.clip_id!r} variable playback is not renderable yet"
                     )
-                if clip.ducking_group is not None:
+                if clip.ducking_group not in {None, "speech"}:
                     raise ProjectRenderUnsupported(
-                        f"audio clip {clip.clip_id!r} ducking is not renderable yet"
+                        f"audio clip {clip.clip_id!r} uses unsupported ducking group "
+                        f"{clip.ducking_group!r}"
                     )
-        elif isinstance(track, CaptionTrack) and any(
-            _overlaps(cue.output, render_range) for cue in track.cues
-        ):
-            raise ProjectRenderUnsupported("caption rendering is not implemented yet")
+                if clip.ducking_group is not None and track.role != "music":
+                    raise ProjectRenderUnsupported(
+                        f"audio clip {clip.clip_id!r} ducking requires a music track"
+                    )
+        elif isinstance(track, CaptionTrack):
+            try:
+                clean_caption_parameters(track.style)
+            except ValueError as exc:
+                raise ProjectRenderUnsupported(str(exc)) from exc
         elif isinstance(track, GraphicTrack) and any(
             _overlaps(graphic.output, render_range) for graphic in track.graphics
         ):
@@ -324,6 +375,7 @@ def _audio_slices(
             slices.append(
                 _AudioSlice(
                     clip=clip,
+                    track_role=track.role,
                     start_frame=start - render_range.start_frame,
                     duration_frames=end - start,
                     clip_head_frames=head,
@@ -332,6 +384,47 @@ def _audio_slices(
                 )
             )
     return tuple(slices)
+
+
+def _caption_slices(
+    document: ProjectDoc,
+    render_range: FrameRange,
+) -> tuple[_CaptionSlice, ...]:
+    slices: list[_CaptionSlice] = []
+    for track in document.timeline.tracks:
+        if not isinstance(track, CaptionTrack) or not track.enabled:
+            continue
+        # Validate the versioned component even if a range preview happens not
+        # to overlap one of its cues. A renderer must never silently accept an
+        # executable definition that it cannot reproduce.
+        try:
+            clean_caption_parameters(track.style)
+        except ValueError as exc:
+            raise ProjectRenderUnsupported(str(exc)) from exc
+        for cue in track.cues:
+            start = max(cue.output.start_frame, render_range.start_frame)
+            end = min(cue.output.end_frame, render_range.end_frame)
+            if end <= start:
+                continue
+            slices.append(
+                _CaptionSlice(
+                    cue=cue,
+                    style=track.style,
+                    start_frame=start - render_range.start_frame,
+                    duration_frames=end - start,
+                )
+            )
+    return tuple(slices)
+
+
+def _validate_ducking(audio: tuple[_AudioSlice, ...]) -> None:
+    ducked = tuple(item for item in audio if item.clip.ducking_group == "speech")
+    if ducked and not any(
+        item.track_role in {"source", "voiceover"} for item in audio
+    ):
+        raise ProjectRenderUnsupported(
+            "speech ducking requires an active source or voiceover speech bus"
+        )
 
 
 def _overlaps(left: FrameRange, right: FrameRange) -> bool:
@@ -469,6 +562,54 @@ def _visual_filters(
     return filters
 
 
+def _caption_overlay_command(
+    video: Path,
+    overlays: tuple,
+    output: Path,
+    profile: _ProjectProfile,
+    duration_frames: int,
+) -> list[str]:
+    duration = _seconds(duration_frames, profile.fps)
+    cmd = [settings.ffmpeg_bin, "-y", "-i", str(video)]
+    for _, overlay in overlays:
+        cmd.extend(["-loop", "1", "-i", str(overlay.path)])
+
+    filters: list[str] = []
+    previous = "[0:v]"
+    for index, (item, overlay) in enumerate(overlays, start=1):
+        label = f"captioned{index}"
+        start = _seconds(item.start_frame, profile.fps)
+        end = _seconds(item.start_frame + item.duration_frames, profile.fps)
+        filters.append(
+            f"{previous}[{index}:v]overlay={overlay.x}:{overlay.y}:"
+            f"enable='gte(t,{start})*lt(t,{end})'[{label}]"
+        )
+        previous = f"[{label}]"
+    cmd.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            previous,
+            "-an",
+            "-r",
+            profile.fps_arg,
+            "-t",
+            duration,
+            "-c:v",
+            profile.video_codec,
+            "-preset",
+            profile.preset,
+            "-crf",
+            str(profile.crf),
+            "-pix_fmt",
+            "yuv420p",
+            str(output),
+        ]
+    )
+    return cmd
+
+
 def _audio_mux_command(
     video: Path,
     audio: tuple[_AudioSlice, ...],
@@ -495,7 +636,9 @@ def _audio_mux_command(
         f"anullsrc=r={profile.audio_sample_rate}:cl=stereo,"
         f"atrim=duration={duration}[silent]"
     ]
-    labels = ["[silent]"]
+    speech_labels: list[str] = []
+    ducked_music_labels: list[str] = []
+    regular_labels: list[str] = []
     for index, item in enumerate(audio, start=1):
         chain = ["asetpts=PTS-STARTPTS"]
         rate = item.clip.playback.rate
@@ -508,7 +651,27 @@ def _audio_mux_command(
             chain.append(f"adelay={delay_ms}|{delay_ms}")
         label = f"a{index}"
         filters.append(f"[{index}:a]{','.join(chain)}[{label}]")
-        labels.append(f"[{label}]")
+        rendered_label = f"[{label}]"
+        if item.clip.ducking_group == "speech":
+            ducked_music_labels.append(rendered_label)
+        elif item.track_role in {"source", "voiceover"}:
+            speech_labels.append(rendered_label)
+        else:
+            regular_labels.append(rendered_label)
+
+    labels = ["[silent]"]
+    if ducked_music_labels:
+        _append_mix_bus(filters, speech_labels, "speechbus")
+        filters.append("[speechbus]asplit=2[speechout][speechsidechain]")
+        _append_mix_bus(filters, ducked_music_labels, "musicbus")
+        filters.append(
+            "[musicbus][speechsidechain]sidechaincompress="
+            "threshold=0.03:ratio=8:attack=20:release=250:makeup=1[duckedmusic]"
+        )
+        labels.extend(("[speechout]", "[duckedmusic]"))
+    else:
+        labels.extend(speech_labels)
+    labels.extend(regular_labels)
     filters.append(
         f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0[aout]"
     )
@@ -536,6 +699,18 @@ def _audio_mux_command(
         ]
     )
     return cmd
+
+
+def _append_mix_bus(filters: list[str], labels: list[str], output: str) -> None:
+    if not labels:
+        raise ProjectRenderUnsupported(f"audio bus {output!r} has no inputs")
+    if len(labels) == 1:
+        filters.append(f"{labels[0]}anull[{output}]")
+        return
+    filters.append(
+        f"{''.join(labels)}amix=inputs={len(labels)}:"
+        f"duration=longest:normalize=0[{output}]"
+    )
 
 
 def _append_fades(chain: list[str], item: _AudioSlice, fps: Fraction) -> None:

@@ -151,7 +151,7 @@ def test_committed_run_requires_patch_revision_and_render_identity() -> None:
             request_id="request_first_cut",
             idempotency_key="first-cut-revision-assets",
             status="committed",
-            provider="offline-director",
+            provider="fixture-director",
             provider_version="1",
             created_at=NOW,
             updated_at=NOW,

@@ -9,8 +9,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .project_errors import install_project_error_handlers
+from .component_dependencies import get_component_application
 from .routes.assets import router as assets_router
 from .routes.conversations import router as conversations_router
+from .routes.components import router as components_router
 from .routes.director import router as director_router
 from .routes.project_revisions import (
     get_project_revision_application,
@@ -68,6 +70,7 @@ async def lifespan(_: FastAPI):
     rendering = get_revision_render_application()
     harness = VideoAgentHarness(
         provider=get_provider(Role.DIRECTOR),
+        component_tools=get_component_application(),
         render_review_engine=RenderReviewEngine(
             provider=get_provider(Role.REVIEWER),
         ),
@@ -104,6 +107,7 @@ async def lifespan(_: FastAPI):
         analysis=SqlAlchemyMediaAnalysisRepository(sessions),
         rendering=rendering,
         harness=harness,
+        assets=SqlAlchemyMediaAssetRepository(sessions),
     )
     conversation_workflow = ConversationWorkflow(
         jobs=jobs,
@@ -186,6 +190,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="aive", version="0.1.0", lifespan=lifespan)
 app.include_router(projects_router)
+app.include_router(components_router)
 app.include_router(assets_router)
 app.include_router(director_router)
 app.include_router(conversations_router)
