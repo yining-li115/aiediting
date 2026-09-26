@@ -73,6 +73,16 @@ def test_unknown_provider_names_are_rejected() -> None:
         get_provider(Role.MATERIAL, "no-such-vendor")
 
 
+def test_gemini_director_is_selected_through_the_existing_provider_port() -> None:
+    from aive.agent.provider import OpenAICompatibleDirectorProvider
+
+    provider = get_provider(Role.DIRECTOR, "gemini-3.8-flash")
+
+    assert isinstance(provider, OpenAICompatibleDirectorProvider)
+    assert provider.name == "gemini-3.8-flash"
+    assert provider.model == "gemini-3.8-flash"
+
+
 # --- provenance ------------------------------------------------------------
 
 

@@ -20,9 +20,11 @@ from aive.providers.base import CostRecord, set_cost_sink
 from aive.providers.openai_compatible import (
     Analysis,
     OpenAICompatibleASRProvider,
+    OpenAICompatibleClient,
     OpenAICompatibleCriticProvider,
     OpenAICompatibleMaterialProvider,
     ProviderConfigError,
+    QuotaExhausted,
     _extract_json,
 )
 from aive.roles import Role
@@ -258,9 +260,11 @@ async def test_token_usage_reaches_the_cost_record(keyframe, cost_log):
 async def test_falls_back_when_json_schema_is_rejected(keyframe):
     """"OpenAI-compatible" often means the transport, not the features."""
     attempts: list[str] = []
+    payloads: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
+        payloads.append(payload)
         mode = (payload.get("response_format") or {}).get("type", "none")
         attempts.append(mode)
         if mode == "json_schema":
@@ -274,13 +278,19 @@ async def test_falls_back_when_json_schema_is_rejected(keyframe):
 
     assert attempts == ["json_schema", "json_object"]
     assert result.semantic_role == "food"
+    assert "Return a single JSON object matching this schema" in (
+        payloads[1]["messages"][0]["content"]
+    )
+    assert '"semantic_role"' in payloads[1]["messages"][0]["content"]
 
 
 async def test_card_without_structured_output_skips_json_schema(keyframe):
     attempts: list[str] = []
+    payloads: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
+        payloads.append(payload)
         attempts.append((payload.get("response_format") or {}).get("type", "none"))
         return reply(GOOD)
 
@@ -289,6 +299,9 @@ async def test_card_without_structured_output_skips_json_schema(keyframe):
     )
     await provider.analyze_segment(segment(), [keyframe])
     assert attempts == ["json_object"]
+    assert "Return a single JSON object matching this schema" in (
+        payloads[0]["messages"][0]["content"]
+    )
 
 
 # --- robustness ------------------------------------------------------------
@@ -547,3 +560,27 @@ async def test_429_is_retried_and_slows_later_calls(monkeypatch):
     assert 3.0 in slept  # Retry-After was honoured rather than a fixed guess
     assert provider.throttled == 1
     ratelimit.reset()
+
+
+async def test_429_is_not_retried_when_a_failover_chain_owns_recovery():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={})
+
+    client = OpenAICompatibleClient(
+        make_card(),
+        transport=httpx.MockTransport(handler),
+    )
+    client.retry_rate_limit_once = False
+
+    with pytest.raises(QuotaExhausted, match="failover"):
+        await client._request(
+            {
+                "model": "test-model-2026-01-01",
+                "messages": [{"role": "user", "content": "test"}],
+            }
+        )
+
+    assert calls["n"] == 1

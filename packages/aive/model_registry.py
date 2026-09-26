@@ -248,6 +248,7 @@ _add(
             Role.INTENT,
             Role.PLANNER,
             Role.CRITIC,
+            Role.DIRECTOR,
         ),
         status="provisional",
         accepts_video=True,
@@ -262,6 +263,7 @@ _add(
         requests_per_minute=10,
         base_url_env="AIVE_GOOGLE_BASE_URL",
         api_key_env="AIVE_GOOGLE_API_KEY",
+        data_shared_with_vendor=True,
         notes=(
             "Current provisional choice for material understanding: a free "
             "tier makes it cheap to iterate on. Default 1 FPS video sampling "
@@ -274,6 +276,105 @@ _add(
             "exact model id in the console",
             "free-tier requests per minute and per day",
             "cross-border data handling for China users",
+        ),
+    )
+)
+
+_add(
+    ModelCard(
+        key="gemini-3.8-flash",
+        vendor="google",
+        model_id="gemini-3.8-flash",
+        adapter="openai_compatible",
+        roles=(Role.DIRECTOR,),
+        status="challenger",
+        structured_output=False,
+        context_tokens=1_000_000,
+        requests_per_minute=10,
+        base_url_env="AIVE_GOOGLE_BASE_URL",
+        api_key_env="AIVE_GOOGLE_API_KEY",
+        data_shared_with_vendor=True,
+        notes=(
+            "Pinned Gemini Flash Director candidate for internal demo footage. "
+            "The OpenAI-compatible endpoint rejects the Director's composite "
+            "JSON Schema, so the adapter uses schema-in-prompt JSON mode. "
+            "Free-tier traffic may be used by the vendor to improve products."
+        ),
+        unknowns=(
+            "free-tier requests per minute and per day for this account",
+            "cross-border data handling for China users",
+        ),
+    )
+)
+
+_add(
+    ModelCard(
+        key="gemini-3.6-flash",
+        vendor="google",
+        model_id="gemini-3.6-flash",
+        adapter="openai_compatible",
+        roles=(Role.DIRECTOR,),
+        status="challenger",
+        structured_output=False,
+        context_tokens=1_000_000,
+        requests_per_minute=10,
+        base_url_env="AIVE_GOOGLE_BASE_URL",
+        api_key_env="AIVE_GOOGLE_API_KEY",
+        data_shared_with_vendor=True,
+        notes=(
+            "Pinned Gemini Flash Director candidate for internal demo footage. "
+            "Uses schema-in-prompt JSON mode because the endpoint rejects the "
+            "Director's composite JSON Schema."
+        ),
+        unknowns=("free-tier requests per minute and per day for this account",),
+    )
+)
+
+_add(
+    ModelCard(
+        key="gemini-3.5-flash",
+        vendor="google",
+        model_id="gemini-3.5-flash",
+        adapter="openai_compatible",
+        roles=(Role.DIRECTOR,),
+        status="challenger",
+        structured_output=False,
+        context_tokens=1_000_000,
+        requests_per_minute=10,
+        base_url_env="AIVE_GOOGLE_BASE_URL",
+        api_key_env="AIVE_GOOGLE_API_KEY",
+        data_shared_with_vendor=True,
+        notes=(
+            "Pinned Gemini Flash Director fallback for internal demo footage. "
+            "Uses schema-in-prompt JSON mode because the endpoint rejects the "
+            "Director's composite JSON Schema."
+        ),
+        unknowns=("free-tier requests per minute and per day for this account",),
+    )
+)
+
+_add(
+    ModelCard(
+        key="gemini-3.1-flash-lite",
+        vendor="google",
+        model_id="gemini-3.1-flash-lite",
+        adapter="openai_compatible",
+        roles=(Role.DIRECTOR,),
+        status="challenger",
+        structured_output=False,
+        context_tokens=1_000_000,
+        requests_per_minute=10,
+        base_url_env="AIVE_GOOGLE_BASE_URL",
+        api_key_env="AIVE_GOOGLE_API_KEY",
+        data_shared_with_vendor=True,
+        notes=(
+            "Pinned lower-cost Gemini Director fallback candidate for internal "
+            "demo footage; switching remains explicit and auditable. Uses "
+            "schema-in-prompt JSON mode for the composite Director response."
+        ),
+        unknowns=(
+            "free-tier requests per minute and per day for this account",
+            "continuous-edit quality relative to Flash",
         ),
     )
 )

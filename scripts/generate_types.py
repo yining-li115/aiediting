@@ -39,6 +39,15 @@ from aive.specs import (  # noqa: E402
     TimelineSpec,
 )
 from aive.contracts.patch import Patch  # noqa: E402
+from aive.contracts.conversation import (  # noqa: E402
+    AgentTurn,
+    AgentTurnTicket,
+    Conversation,
+    ConversationTicket,
+    CreateAgentTurnRequest,
+    CreateConversationRequest,
+    WorkspaceSelection,
+)
 from aive.contracts.director import (  # noqa: E402
     CreateFirstCutRequest,
     DirectorRun,
@@ -103,6 +112,13 @@ EXPORTED = [
     FirstCutDecision,
     DirectorRun,
     FirstCutTicket,
+    CreateConversationRequest,
+    WorkspaceSelection,
+    CreateAgentTurnRequest,
+    Conversation,
+    ConversationTicket,
+    AgentTurn,
+    AgentTurnTicket,
 ]
 
 

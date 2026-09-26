@@ -6,14 +6,35 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from aive.agent.provider import DirectorProviderError, VolcanoDirectorProvider
+from aive.agent.provider import (
+    DirectorProviderError,
+    OpenAICompatibleDirectorProvider,
+    VolcanoDirectorProvider,
+)
+from aive.agent.harness import VideoAgentHarness
+from aive.contracts.conversation import AgentTurnContext, WorkspaceSelection
 from aive.contracts.director import (
     AgentAssetContext,
     AgentRunContext,
     FirstCutDecision,
 )
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
-from aive.contracts.project_doc import OutputSettings, ProjectIntent, Rational
+from aive.contracts.project_doc import (
+    AssetRef,
+    AudioClip,
+    AudioTrack,
+    DependencyRef,
+    DependencySet,
+    FrameRange,
+    OutputSettings,
+    ProjectDoc,
+    ProjectIntent,
+    Rational,
+    SourceRange,
+    Timeline,
+    VideoClip,
+    VideoTrack,
+)
 from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 from aive.model_registry import ModelCard
 from aive.roles import Role
@@ -63,6 +84,258 @@ def _context() -> AgentRunContext:
             ),
         ),
     )
+
+
+def _turn_context() -> AgentTurnContext:
+    director = _context()
+    document = ProjectDoc(
+        project_id=director.project_id,
+        revision_id=director.base_revision_id,
+        intent=director.intent,
+        assets=(AssetRef(asset_id="asset_1", kind="video"),),
+        timeline=Timeline(
+            duration_frames=60,
+            output=director.output,
+            tracks=(
+                VideoTrack(
+                    track_id="track_video",
+                    role="primary",
+                    clips=(
+                        VideoClip(
+                            clip_id="clip_visual_1",
+                            asset_id="asset_1",
+                            source=SourceRange(start=0, end=1_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=30),
+                        ),
+                        VideoClip(
+                            clip_id="clip_visual_2",
+                            asset_id="asset_1",
+                            source=SourceRange(start=1_000, end=2_000, timescale=1_000),
+                            output=FrameRange(start_frame=30, duration_frames=30),
+                        ),
+                    ),
+                ),
+                AudioTrack(
+                    track_id="track_audio",
+                    role="source",
+                    clips=(
+                        AudioClip(
+                            clip_id="clip_audio_1",
+                            asset_id="asset_1",
+                            source=SourceRange(start=0, end=1_000, timescale=1_000),
+                            output=FrameRange(start_frame=0, duration_frames=30),
+                        ),
+                        AudioClip(
+                            clip_id="clip_audio_2",
+                            asset_id="asset_1",
+                            source=SourceRange(start=1_000, end=2_000, timescale=1_000),
+                            output=FrameRange(start_frame=30, duration_frames=30),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        dependencies=DependencySet(
+            renderer=DependencyRef(name="ffmpeg", version="1")
+        ),
+    )
+    return AgentTurnContext(
+        turn_id="turn_volcano",
+        project_id=director.project_id,
+        conversation_id="conversation_volcano",
+        base_revision_id=director.base_revision_id,
+        document_hash=director.document_hash,
+        instruction="Find the food close-up",
+        document=document,
+        moments=director.moments,
+        workspace=WorkspaceSelection(
+            revision_id=director.base_revision_id,
+            playhead_frame=45,
+        ),
+        allowed_tools=(
+            "read_project",
+            "search_moments",
+            "inspect_media",
+            "propose_patch",
+        ),
+        max_tool_steps=6,
+    )
+
+
+async def test_google_director_uses_the_shared_structured_tool_schema(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "kind": "tool_call",
+                                    "call": {
+                                        "tool": "read_project",
+                                        "call_id": "call_read_project",
+                                    },
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-gemini-director",
+            vendor="google",
+            model_id="gemini-test-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    decision = await provider.next_edit_step(_turn_context(), ())
+
+    assert decision.kind == "tool_call"
+    assert decision.call is not None
+    assert decision.call.tool == "read_project"
+    assert requests[0]["model"] == "gemini-test-snapshot"
+    assert requests[0]["response_format"]["type"] == "json_schema"
+
+
+async def test_google_director_clarifies_ungrounded_instruction_before_tools(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "decision": "clarify",
+                                    "clarification_question": (
+                                        "你想调整哪个镜头，以及希望怎么调整？"
+                                    ),
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-gemini-director",
+            vendor="google",
+            model_id="gemini-test-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    context = _turn_context().model_copy(
+        update={
+            "instruction": "把这个镜头调整一下。",
+            "workspace": WorkspaceSelection(revision_id="revision_assets"),
+        }
+    )
+
+    decision = await provider.next_edit_step(context, ())
+
+    assert decision.kind == "finish"
+    assert decision.response == "你想调整哪个镜头，以及希望怎么调整？"
+    serialized = json.dumps(requests[0], ensure_ascii=False)
+    assert "semantic clarification" in serialized
+    assert "conversation_history" not in serialized
+
+
+async def test_google_director_allows_explicit_ordinal_target_without_workspace(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "decision": "proceed",
+                                    "action_summary": "move one whole shot",
+                                    "target_reference": "the third shot",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-gemini-director",
+            vendor="google",
+            model_id="gemini-test-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    context = _turn_context().model_copy(
+        update={
+            "instruction": "把第三个镜头移到最前面。",
+            "workspace": WorkspaceSelection(revision_id="revision_assets"),
+        }
+    )
+
+    decision = await provider.next_edit_step(context, ())
+
+    assert decision.kind == "tool_call"
+    assert decision.call is not None
+    assert decision.call.tool == "read_project"
+    assert len(requests) == 1
 
 
 async def test_volcano_provider_returns_typed_composite_decision(monkeypatch) -> None:
@@ -123,6 +396,141 @@ async def test_volcano_provider_returns_typed_composite_decision(monkeypatch) ->
     assert decision.copy_strategy.title == "Made in seconds"
     assert requests[0]["model"] == "ep-test-director"
     assert "project_volcano" in json.dumps(requests[0], ensure_ascii=False)
+
+
+async def test_volcano_provider_returns_one_typed_continuous_edit_tool_call(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIVE_TEST_ARK_URL", "https://ark.example.invalid/api/v3")
+    monkeypatch.setenv("AIVE_TEST_ARK_KEY", "test-key")
+    answer = {
+        "kind": "tool_call",
+        "call": {
+            "tool": "search_moments",
+            "call_id": "call_search_food",
+            "query": {"text": "food close-up", "limit": 5},
+        },
+    }
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(answer)}}]},
+        )
+
+    provider = VolcanoDirectorProvider(
+        card=ModelCard(
+            key="test-doubao-director",
+            vendor="bytedance-volcengine",
+            model_id="ep-test-director",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_ARK_URL",
+            api_key_env="AIVE_TEST_ARK_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    decision = await provider.next_edit_step(_turn_context(), ())
+
+    assert decision.kind == "tool_call"
+    assert decision.call is not None
+    assert decision.call.tool == "search_moments"
+    assert decision.call.query.text == "food close-up"
+    serialized = json.dumps(requests[0], ensure_ascii=False)
+    assert "allowed_tools" in serialized
+    assert "Prior tool steps" in serialized
+
+
+async def test_volcano_provider_emits_structural_patch_through_real_tool_schema(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIVE_TEST_ARK_URL", "https://ark.example.invalid/api/v3")
+    monkeypatch.setenv("AIVE_TEST_ARK_KEY", "test-key")
+    answers = iter(
+        (
+            {
+                "kind": "tool_call",
+                "call": {
+                    "tool": "read_project",
+                    "call_id": "call_read_timeline",
+                },
+            },
+            {
+                "kind": "tool_call",
+                "call": {
+                    "tool": "propose_patch",
+                    "call_id": "call_delete_shot",
+                    "proposal": {
+                        "summary": "Delete the shot at the playhead",
+                        "rationale": (
+                            "Frame 45 is inside clip_visual_2, so remove that whole "
+                            "shot and its matching source audio."
+                        ),
+                        "scope": {"kind": "global", "allow_ripple": True},
+                        "operations": [
+                            {
+                                "op": "delete_visual_clip",
+                                "operation_id": "operation_delete_visual_2",
+                                "clip_id": "clip_visual_2",
+                            },
+                            {
+                                "op": "delete_audio_clip",
+                                "operation_id": "operation_delete_audio_2",
+                                "clip_id": "clip_audio_2",
+                            },
+                            {
+                                "op": "set_timeline_duration",
+                                "operation_id": "operation_duration_30",
+                                "duration_frames": 30,
+                            },
+                        ],
+                    },
+                },
+            },
+        )
+    )
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(next(answers))}}]},
+        )
+
+    provider = VolcanoDirectorProvider(
+        card=ModelCard(
+            key="test-doubao-director",
+            vendor="bytedance-volcengine",
+            model_id="ep-test-director",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            structured_output=True,
+            base_url_env="AIVE_TEST_ARK_URL",
+            api_key_env="AIVE_TEST_ARK_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    outcome = await VideoAgentHarness(provider=provider).run_edit_turn(
+        _turn_context()
+    )
+
+    assert outcome.proposal is not None
+    assert [operation.op for operation in outcome.proposal.operations] == [
+        "delete_visual_clip",
+        "delete_audio_clip",
+        "set_timeline_duration",
+    ]
+    serialized = json.dumps(requests, ensure_ascii=False)
+    assert '\\"playhead_frame\\":45' in serialized
+    assert "do not use a keyword-to-operation lookup" in serialized
+    assert "MUST include replace_visual_source plus set_visual_output" in serialized
+    assert "source_duration_ticks * fps.num * rate.den" in serialized
 
 
 def test_volcano_provider_rejects_data_sharing_endpoint_by_default() -> None:

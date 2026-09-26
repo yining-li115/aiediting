@@ -11,6 +11,12 @@ from aive.media.repository import (
     ProjectAssetNotFound,
 )
 from aive.agent.application import FirstCutInputUnavailable
+from aive.agent.conversation_application import ContinuousEditUnavailable
+from aive.db.conversation_repository import (
+    AgentTurnNotFound,
+    ConversationConflict,
+    ConversationNotFound,
+)
 from aive.agent.repository import (
     DirectorIdempotencyConflict,
     DirectorJobConflict,
@@ -77,6 +83,10 @@ def install_project_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(DirectorRevisionConflict, _repository_conflict)
     app.add_exception_handler(DirectorJobConflict, _repository_conflict)
     app.add_exception_handler(FirstCutInputUnavailable, _first_cut_unavailable)
+    app.add_exception_handler(ConversationNotFound, _not_found)
+    app.add_exception_handler(AgentTurnNotFound, _not_found)
+    app.add_exception_handler(ConversationConflict, _repository_conflict)
+    app.add_exception_handler(ContinuousEditUnavailable, _continuous_edit_unavailable)
     app.add_exception_handler(FFmpegError, _render_unsupported)
     app.add_exception_handler(
         AssetAuthorizationUnavailable,
@@ -190,6 +200,10 @@ async def _render_unsupported(_: Request, exc: Exception) -> JSONResponse:
 
 async def _first_cut_unavailable(_: Request, exc: Exception) -> JSONResponse:
     return _error(409, "first_cut_input_unavailable", str(exc), retryable=True)
+
+
+async def _continuous_edit_unavailable(_: Request, exc: Exception) -> JSONResponse:
+    return _error(409, "continuous_edit_unavailable", str(exc), retryable=True)
 
 
 def _error(

@@ -23,11 +23,11 @@ upload -> proxy/thumbnail -> Shots/ASR/Moments
   -> browser playback
 ```
 
-The offline Director remains the default so the complete product state and
-failure boundaries work without credentials or paid calls. The Volcengine Ark
-adapter implements the same `DirectorProvider` port and is selected through
-the `director` model role; configuring it does not change ProjectService,
-Patch, Revision, or rendering behavior.
+The offline Director remains the repository default so tests and recovery
+fixtures work without credentials or paid calls. The shared OpenAI-compatible
+Director adapter serves pinned Gemini or Volcengine model cards through the
+same `DirectorProvider` port; configuring either does not change
+ProjectService, Patch, Revision, or rendering behavior.
 
 `VideoAgentHarness` is the runtime boundary around model-driven work, not a
 second application or project state. It owns context construction, provider
@@ -85,6 +85,14 @@ strategy is rejected unless an authorized music Asset exists.
 endpoint configured by `AIVE_ARK_BASE_URL`, `AIVE_ARK_API_KEY`, and
 `AIVE_ARK_MODEL_ID`. The data-sharing development endpoint is rejected for
 user projects unless a test-only opt-in is supplied explicitly.
+
+For internal investor-demo qualification,
+`AIVE_ROLE_DIRECTOR_MODEL=gemini-3.6-flash` may be paired with the pinned,
+comma-separated `AIVE_ROLE_DIRECTOR_FALLBACK_MODELS`. The chain switches only
+after quota, timeout, or temporary capacity failures. It does not use a second
+model to hide malformed decisions or deterministic validation failures. Free
+Gemini traffic is marked data-sharing and is restricted to owned/synthetic
+demo footage.
 
 ## 5. Decision review and bounded AutoFix
 
@@ -199,9 +207,9 @@ The first-cut path currently requires:
 - at least one analyzed, usable Moment;
 - the currently executable FFmpeg subset documented in `RENDERING_V1.md`.
 
-The typed `search_moments` and `inspect_media` tools are implemented over the
-frozen context. A dynamic multi-call model tool loop, reference remake, and
-continuous conversational edits remain later Stage 3/4 work.
+The typed `search_moments` and `inspect_media` tools are implemented over frozen
+context. They now also run inside the durable bounded continuous-edit tool loop
+documented in `CONTINUOUS_EDITING_V1.md`. Reference remake remains later work.
 
 ## 10. HTTP and browser behavior
 
@@ -215,8 +223,13 @@ continuous conversational edits remain later Stage 3/4 work.
 
 ## 11. Remaining boundary
 
-The first-cut model/context/review path is implemented, but live Volcengine
-quality is not claimed until credentials are configured and a real golden
-footage run succeeds. Default offline review does not claim visual judgment.
+The first-cut model/context/review path is implemented, but production model
+quality is not claimed until a real golden-footage run succeeds. Default
+offline review does not claim visual judgment.
 Rendered captions, a licensed music library, more capable effect-aware repair,
-and conversational Quick Edit belong to following slices.
+full workspace selection, and the wider continuous-edit operation set belong
+to following slices. The formal continuous-edit schema already includes
+clip-boundary Trim and whole-clip Move/Delete. A real Gemini model has completed
+one isolated whole-clip Delete turn through ProjectService, Revision, and
+preview enqueue; Trim, Move, multi-turn behavior, real footage, and final
+production-model selection remain unqualified.

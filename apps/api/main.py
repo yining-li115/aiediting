@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .project_errors import install_project_error_handlers
 from .routes.assets import router as assets_router
+from .routes.conversations import router as conversations_router
 from .routes.director import router as director_router
 from .routes.project_revisions import (
     get_project_revision_application,
@@ -25,6 +26,8 @@ from .streams import sse_response
 from aive.config import settings
 from aive.agent import (
     AutonomousProjectWorkflow,
+    ConversationApplication,
+    ConversationWorkflow,
     DirectorApplication,
     FirstCutWorkflow,
     RenderReviewApplication,
@@ -32,6 +35,7 @@ from aive.agent import (
     VideoAgentHarness,
 )
 from aive.db.analysis_repository import SqlAlchemyMediaAnalysisRepository
+from aive.db.conversation_repository import SqlAlchemyConversationRepository
 from aive.db.director_repository import SqlAlchemyDirectorRunRepository
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.project_repository import SqlAlchemyRevisionRepository
@@ -94,6 +98,18 @@ async def lifespan(_: FastAPI):
         analysis=analysis,
         first_cuts=first_cuts,
     )
+    conversations = ConversationApplication(
+        repository=SqlAlchemyConversationRepository(sessions),
+        projects=get_project_revision_application(),
+        analysis=SqlAlchemyMediaAnalysisRepository(sessions),
+        rendering=rendering,
+        harness=harness,
+    )
+    conversation_workflow = ConversationWorkflow(
+        jobs=jobs,
+        conversations=conversations,
+        rendering=rendering,
+    )
     pending_render_reviews = tuple(
         run
         for run in director.incomplete_render_reviews()
@@ -135,6 +151,10 @@ async def lifespan(_: FastAPI):
         for job_id in jobs.recoverable("director_first_cut")
     )
     recovered.update(
+        asyncio.create_task(conversation_workflow.run(job_id))
+        for job_id in jobs.recoverable("continuous_edit")
+    )
+    recovered.update(
         asyncio.create_task(first_cuts.resume_review(run.job_id))
         for run in pending_render_reviews
     )
@@ -168,6 +188,7 @@ app = FastAPI(title="aive", version="0.1.0", lifespan=lifespan)
 app.include_router(projects_router)
 app.include_router(assets_router)
 app.include_router(director_router)
+app.include_router(conversations_router)
 app.include_router(project_revisions_router)
 app.include_router(renders_router)
 install_project_error_handlers(app)

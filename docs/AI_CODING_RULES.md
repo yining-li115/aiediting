@@ -26,6 +26,10 @@ If those answers are unclear, inspect the repository before adding files.
 - Application services persist Harness inputs and outputs and invoke the
   existing ProjectService and Job paths. Do not let a new Agent workflow create
   a parallel project state or write path.
+- Continuous-edit model access must go through the closed Tool Registry and its
+  hard step limit. A provider may choose tools, but prompts may not add tools,
+  raise limits, execute a Patch, or bypass persisted AgentTurnContext/tool
+  traces.
 - Prefer a named domain module over `utils.py`, `helpers.py`, `common.py`, or a
   generic `manager.py`.
 - Do not duplicate Pydantic models as handwritten TypeScript interfaces.
@@ -49,6 +53,9 @@ If those answers are unclear, inspect the repository before adding files.
   reference requirement, lock, or unsupported effect.
 - Keep IDs stable. Never address timeline elements by mutable array position.
 - Long operations return a Job. They do not hold an HTTP request open.
+- Persist the frozen Agent context before its first provider call and each tool
+  result before the next call. Recovery must not silently substitute a newer
+  Revision, Moment set, conversation history, or workspace selection.
 - Every artifact records the project revision and implementation/configuration
   version that produced it.
 - Autonomous Agent candidates that require rendered-output review must remain

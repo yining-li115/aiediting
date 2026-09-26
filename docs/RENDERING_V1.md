@@ -65,6 +65,19 @@ configured Reviewer provider may add multimodal creative judgment through the
 same contract. Manual preview and export requests are not automatically sent
 to the creative Reviewer; the gate applies to autonomous candidate acceptance.
 
+### 3.1 Continuous-edit preflight
+
+Before an immediate continuous-edit candidate can advance the Project head,
+the application passes that exact in-memory candidate through the configured
+`RendererProvider.validate` path and resolves its proxy media inputs. This is a
+read-only preflight: it creates no Artifact, performs no encode, and runs before
+the repository commit transaction. A primary-track gap or overlap, unsupported
+layer, or unavailable source rejects the Agent Turn while the previous Revision
+remains current.
+
+The preflight does not replace rendered-output review or user confirmation.
+Those remain required for the later high-impact Candidate gate.
+
 ## 4. Currently executable FFmpeg subset
 
 The current provider renders:

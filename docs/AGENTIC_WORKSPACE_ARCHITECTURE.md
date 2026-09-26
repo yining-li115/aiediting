@@ -78,8 +78,8 @@ reasoning. Both layers are required.
 `VideoAgentHarness` is the runtime and control boundary around model-driven
 editing. It owns frozen context construction, model/provider invocation,
 workflow-local decision review, rendered-output review, and bounded recovery.
-The autonomous first-cut `DirectorPipeline` and post-render Reviewer are the
-first workflows hosted by this Harness.
+The autonomous first-cut `DirectorPipeline`, post-render Reviewer, and bounded
+continuous-edit tool loop are workflows hosted by this Harness.
 
 The Harness does not own repositories, ProjectDoc mutation, Patch commit,
 render execution, or HTTP behavior. `DirectorApplication` persists Harness
@@ -240,10 +240,18 @@ autonomous first-cut vertical slice are now implemented):
    export, HTTP delivery, and browser playback implemented**);
 7. Agent Harness, tools, and continuous conversational editing (**explicit
    VideoAgentHarness runtime boundary, frozen AgentRunContext, typed Moment
-   search/inspection, composite offline/Volcengine Director, structured
+   search/inspection, composite offline/OpenAI-compatible Director, structured
    creative/copy/caption/music decision, deterministic review, one bounded
    AutoFix, first-cut Patch -> candidate Revision -> automatic preview ->
    post-render Reviewer -> bounded replacement AutoFix -> atomic acceptance
-   implemented; live model qualification and iterative chat edits remain**).
+   implemented; durable Conversation/AgentTurnContext, closed Tool Registry,
+   six-step tool loop, Moment search/inspection, initial local typed Patch,
+   explanation, automatic preview, HTTP, and left-panel chat are also
+   implemented. Revision-bound Preview playhead context and the formal
+   provider-neutral typed path for clip-boundary Trim and whole-clip
+   Move/Delete are connected without keyword intent rules. A real Gemini
+   whole-clip Delete reached a Revision and preview enqueue in an isolated
+   golden run; full workspace selection, compaction, Trim/Move and real-footage
+   model qualification remain**).
 
 Each later layer depends on the earlier state boundary and must not replace it.

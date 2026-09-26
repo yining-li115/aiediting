@@ -11,18 +11,19 @@ Repository implementation rules and delivery order are defined in:
 - [Architecture Guardrails](docs/ARCHITECTURE_GUARDRAILS.md)
 - [Agentic Workspace Architecture](docs/AGENTIC_WORKSPACE_ARCHITECTURE.md)
 - [Investor Demo Roadmap](docs/INVESTOR_DEMO_ROADMAP.md)
+- [Investor Demo Completion Checklist](docs/INVESTOR_DEMO_CHECKLIST.md)
 - [AI Coding Rules](docs/AI_CODING_RULES.md)
 - [ProjectDoc v1 Contract](docs/PROJECT_DOC_V1.md)
 - [Patch v1 Contract](docs/PATCH_V1.md)
 - [Revision and Commit State Machine](docs/REVISION_COMMIT_STATE_MACHINE.md)
 
 Current state: the Project kernel, immutable Revision history, browser project
-creation, project-scoped upload, durable proxy/thumbnail Jobs, and reload-safe
-media readiness are connected. Ready media now flows through durable physical
-Shot detection, quality/keyframe analysis, and semantic Moment understanding.
-Uploaded media is attached to ProjectDoc through the normal typed Patch path;
-derived Moments remain evidence. Revision-bound preview/export is the next
-vertical slice.
+creation, media upload/understanding, autonomous first cut, revision-bound
+preview/export, post-render Reviewer/AutoFix, and the first bounded continuous
+editing conversation are connected. ProjectDoc remains the only authoritative
+edit state and every accepted UI or Agent edit uses the typed Patch path. The
+remaining editor, presentation, Reference Remake, live-model qualification,
+and demo-reliability work is tracked in the completion checklist above.
 
 ## Setup
 
@@ -81,3 +82,28 @@ Three boundaries that must not blur:
 Copy `.env.example` to `.env`. Every model role is configured separately —
 there is deliberately no global `AIVE_MODEL`. All roles default to `mock`, so
 the whole skeleton runs offline with no API keys and no cost.
+
+For owned/synthetic investor-demo footage, the Continuous Editing Director can
+use pinned Gemini models through the existing provider port:
+
+```bash
+AIVE_ROLE_DIRECTOR_MODEL=gemini-3.6-flash
+AIVE_ROLE_DIRECTOR_FALLBACK_MODELS=gemini-3.5-flash,gemini-3.1-flash-lite
+```
+
+Fallback is limited to quota, timeout, and temporary capacity failures. Invalid
+model output and rejected Patches never trigger model failover; a rejected
+Patch may instead be corrected by the same bounded tool loop after a no-write
+ProjectService/renderer dry-run. Free-tier Gemini traffic may be used by Google
+to improve its products, so this configuration is not for customer footage.
+
+Run the live synthetic Continuous Editing qualification without touching the
+developer database:
+
+```bash
+./.venv/bin/python scripts/check_continuous_edit_golden.py
+```
+
+It validates Trim, Move, Delete, clarification, immutable Revision history,
+source-audio pairing, and real FFmpeg preview files. The command calls the
+configured Director models and therefore consumes external quota.

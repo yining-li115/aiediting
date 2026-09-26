@@ -13,8 +13,14 @@
  */
 
 import type {
+  AgentTurn,
+  AgentTurnTicket,
   AssetProcessingStatus,
   AssetUploadResponse,
+  Conversation,
+  ConversationTicket,
+  CreateAgentTurnRequest,
+  CreateConversationRequest,
   CreateRenderRequest,
   CreateFirstCutRequest,
   DirectorRun,
@@ -322,6 +328,48 @@ export const getLatestFirstCut = (
 ) =>
   request<DirectorRun | null>(
     `/projects/${pathSegment(projectId)}/first-cuts/latest`,
+    { signal },
+  );
+
+/* --- continuous editing conversation ---------------------------------- */
+
+export const createProjectConversation = (
+  projectId: string,
+  body: CreateConversationRequest,
+) =>
+  request<ConversationTicket>(
+    `/projects/${pathSegment(projectId)}/conversations`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const getProjectConversation = (
+  projectId: string,
+  conversationId: string,
+  signal?: AbortSignal,
+) =>
+  request<Conversation>(
+    `/projects/${pathSegment(projectId)}/conversations/${pathSegment(conversationId)}`,
+    { signal },
+  );
+
+export const createConversationTurn = (
+  projectId: string,
+  conversationId: string,
+  body: CreateAgentTurnRequest,
+) =>
+  request<AgentTurnTicket>(
+    `/projects/${pathSegment(projectId)}/conversations/${pathSegment(conversationId)}/turns`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export const getConversationTurn = (
+  projectId: string,
+  conversationId: string,
+  turnId: string,
+  signal?: AbortSignal,
+) =>
+  request<AgentTurn>(
+    `/projects/${pathSegment(projectId)}/conversations/${pathSegment(conversationId)}/turns/${pathSegment(turnId)}`,
     { signal },
   );
 

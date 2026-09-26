@@ -10,6 +10,7 @@ change the catalog entry, not the code path.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable
 
 from ..model_registry import ModelCard, card_for
@@ -76,8 +77,15 @@ def _openai_compatible_factory(role: Role):
             OpenAICompatiblePlannerProvider,
         )
         from ..agent.provider import (  # noqa: PLC0415
+            OpenAICompatibleDirectorProvider,
             VolcanoDirectorProvider,
             VolcanoRenderReviewerProvider,
+        )
+
+        director_class = (
+            VolcanoDirectorProvider
+            if card is not None and card.vendor == "bytedance-volcengine"
+            else OpenAICompatibleDirectorProvider
         )
 
         classes = {
@@ -89,7 +97,7 @@ def _openai_compatible_factory(role: Role):
             Role.AGENT_DEEP: OpenAICompatiblePlannerProvider,
             Role.CRITIC: OpenAICompatibleCriticProvider,
             Role.ASR: OpenAICompatibleASRProvider,
-            Role.DIRECTOR: VolcanoDirectorProvider,
+            Role.DIRECTOR: director_class,
             Role.REVIEWER: VolcanoRenderReviewerProvider,
         }
         assert card is not None, "openai_compatible needs its ModelCard"
@@ -141,6 +149,36 @@ def get_provider(
     normal callers pass nothing and get whatever the catalog selects.
     """
     card: ModelCard = card_for(role, model_key)
+    provider = _provider_for_card(role, card, **kwargs)
+    if role != Role.DIRECTOR or model_key is not None:
+        return provider
+
+    fallback_value = os.environ.get("AIVE_ROLE_DIRECTOR_FALLBACK_MODELS", "")
+    fallback_keys = tuple(
+        key.strip() for key in fallback_value.split(",") if key.strip()
+    )
+    if not fallback_keys:
+        return provider
+    chain_keys = (card.key, *fallback_keys)
+    if len(chain_keys) != len(set(chain_keys)):
+        raise ValueError("Director fallback model keys must be unique")
+    from ..agent.provider import DirectorFailoverProvider  # noqa: PLC0415
+
+    providers = (
+        provider,
+        *(
+            _provider_for_card(role, card_for(role, key), **kwargs)
+            for key in fallback_keys
+        ),
+    )
+    return DirectorFailoverProvider(providers)
+
+
+def _provider_for_card(
+    role: Role,
+    card: ModelCard,
+    **kwargs: Any,
+) -> BaseProvider:
     factory = _ADAPTERS.get((card.adapter, role))
     if factory is None:
         raise KeyError(

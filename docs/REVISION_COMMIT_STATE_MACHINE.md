@@ -200,6 +200,10 @@ they must join this same transaction rather than creating another commit path.
 Media inspection, models, downloads, rendering, and capability discovery never
 run inside this transaction.
 
+Continuous editing may run a read-only renderer/source preflight on the pure
+in-memory candidate before this transaction begins. A failed preflight stores
+neither the candidate nor a commit attempt and cannot move the Project head.
+
 ## 10. Implemented persistence shape
 
 Migration `6d2f0d4e8a91` adds:

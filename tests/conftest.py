@@ -35,6 +35,7 @@ def offline_stack(monkeypatch):
     for role in Role:
         default = "passthrough" if role is Role.CRITIC else "mock"
         monkeypatch.setenv(f"AIVE_ROLE_{role.name}_MODEL", default)
+    monkeypatch.delenv("AIVE_ROLE_DIRECTOR_FALLBACK_MODELS", raising=False)
 
     # Tests must not write into the real call log: a log that mixes fixture
     # traffic with real runs is useless for diagnosing a real run.

@@ -3,6 +3,10 @@
 Status: product-complete target, implemented through sequential vertical
 slices.
 
+The execution checklist is maintained in `INVESTOR_DEMO_CHECKLIST.md`. Update
+that checklist only when a user-visible vertical path and its verification are
+actually complete.
+
 The demo is not a reduced product concept. It must show the complete product
 story convincingly while the implementation is built in an order that keeps
 every stage testable and reusable.
@@ -98,7 +102,8 @@ Stage 3.
 
 Status: the model-capable vertical slice is implemented behind an explicit
 VideoAgentHarness runtime boundary. The Harness freezes an AgentRunContext,
-invokes an offline or Volcengine Director, and owns deterministic review plus
+invokes an offline or OpenAI-compatible Gemini/Volcengine Director, and owns
+deterministic review plus
 at most one bounded AutoFix. The application layer then creates a typed
 first-cut Patch through ProjectService, stores one immutable candidate Agent
 Revision, automatically renders it, runs deterministic plus optional
@@ -107,8 +112,8 @@ AutoFix for repairable blocking issues, and atomically accepts only an approved
 candidate.
 The browser exposes progress, explanation, and the Reviewer summary. Failed
 providers, exhausted repairs, render failures, and final review rejection preserve
-the previous revision. A live Volcengine golden-run, rendered captions/music,
-effect-aware repair beyond the first-cut subset, and iterative chat edits remain.
+the previous revision. A production-model golden run, rendered captions/music,
+effect-aware repair beyond the first-cut subset remain.
 
 Deliver:
 
@@ -122,6 +127,25 @@ Exit condition: a real footage set produces a coherent editable draft through
 the browser, and a failed model call leaves the project intact.
 
 ### Stage 4 - Continuous editing
+
+Status: the first safe vertical slice is implemented. A durable primary
+Conversation records messages and Agent turns; each turn freezes ProjectDoc,
+Moment evidence, recent conversation history, and workspace context. The
+VideoAgentHarness runs a six-step closed Tool Registry containing
+`read_project`, `search_moments`, `inspect_media`, and `propose_patch`.
+Accepted low-risk proposals use the shared ProjectService commit path, enqueue
+a Revision-bound preview, persist an operation-derived explanation, and update
+the left-side browser conversation. Preview playback now freezes an absolute
+Revision frame into the turn. The formal model schema and shared Patch path
+support clip-boundary Trim and whole-clip Move/Delete; one real Gemini
+Golden Run has now completed Trim -> Move -> Delete -> clarification in one
+Conversation. Every accepted turn passed a no-write ProjectService/renderer
+dry-run, committed a child Revision, kept source audio paired, and produced a
+revision-bound FFmpeg preview; the ambiguous turn produced only a question.
+This qualifies the temporary Gemini chain and synthetic edit fixture, not the
+final production model or investor-demo story footage. See
+`CONTINUOUS_EDITING_V1.md` for the exact supported subset and remaining
+boundaries.
 
 Deliver:
 

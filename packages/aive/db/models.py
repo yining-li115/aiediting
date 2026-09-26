@@ -549,6 +549,51 @@ class UserCorrection(Base, TimestampMixin):
 # --- interaction layer -------------------------------------------------------
 
 
+class ConversationRow(Base):
+    """Project-scoped chat container; never authoritative edit state."""
+
+    __tablename__ = "conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "purpose",
+            name="uq_conversations_project_id_purpose",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ConversationMessageRow(Base):
+    """User intent or Agent explanation linked to a durable editing turn."""
+
+    __tablename__ = "conversation_messages"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("conversations.id"), nullable=False, index=True
+    )
+    agent_turn_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("agent_turns.id"), nullable=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    base_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=True
+    )
+    result_revision_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ProjectRevisionRow(Base):
     """Insert-only authoritative ProjectDoc snapshot."""
 
@@ -640,23 +685,58 @@ class EditOperationRow(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-class AgentTurn(Base, TimestampMixin):
-    """Per-turn audit trail. Every agent metric is computed from this table."""
+class AgentTurnRow(Base, TimestampMixin):
+    """Durable state and trace for one bounded continuous-edit Agent turn."""
 
     __tablename__ = "agent_turns"
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(String(64))
-    version_before: Mapped[str | None] = mapped_column(String(64))
-    version_after: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_agent_turns_project_id_idempotency_key",
+        ),
+        UniqueConstraint("job_id", name="uq_agent_turns_job_id"),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("conversations.id"), index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("jobs.id"))
+    request_id: Mapped[str | None] = mapped_column(String(128))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    request_hash: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str | None] = mapped_column(String(32))
+    version_before: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id")
+    )
+    version_after: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("project_revisions.id")
+    )
     instruction: Mapped[str] = mapped_column(Text)
     route: Mapped[str] = mapped_column(String(8))  # fast | deep
     resolved_scope_json: Mapped[dict | None] = mapped_column(JSON)
     model: Mapped[str | None] = mapped_column(String(128))
+    provider_version: Mapped[str | None] = mapped_column(String(128))
+    context_json: Mapped[dict | None] = mapped_column(JSON)
+    steps_json: Mapped[list | None] = mapped_column(JSON)
+    patch_json: Mapped[dict | None] = mapped_column(JSON)
+    render_artifact_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("render_artifacts.id")
+    )
+    render_job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.id")
+    )
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     op_count: Mapped[int] = mapped_column(Integer, default=0)
     precheck_violations_json: Mapped[list | None] = mapped_column(JSON)
-    # applied | rejected | rolled_back | undone
-    outcome: Mapped[str] = mapped_column(String(32), default="applied")
+    outcome: Mapped[str] = mapped_column(String(32), default="pending")
+    error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class ElementLock(Base, TimestampMixin):

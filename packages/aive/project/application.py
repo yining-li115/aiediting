@@ -49,6 +49,7 @@ class ProjectMutationError(RuntimeError):
 
 IdFactory = Callable[[str], str]
 Clock = Callable[[], datetime]
+CandidateValidator = Callable[[ProjectRevision], None]
 
 
 def _new_id(prefix: str) -> str:
@@ -130,6 +131,7 @@ class ProjectRevisionApplication:
         patch: Patch,
         *,
         require_review: bool = False,
+        candidate_validator: CandidateValidator | None = None,
     ) -> RevisionWriteResult:
         replay = self._repository.get_idempotent_result(
             patch.project_id,
@@ -162,12 +164,43 @@ class ProjectRevisionApplication:
             actor_id=None,
             require_review=require_review,
         )
+        if candidate_validator is not None:
+            candidate_validator(candidate.revision)
         result = (
             self._repository.store_candidate(candidate)
             if require_review
             else self._repository.commit_candidate(candidate)
         )
         return self._require_success(result)
+
+    def validate_patch(
+        self,
+        patch: Patch,
+        *,
+        candidate_validator: CandidateValidator | None = None,
+    ) -> ProjectRevision:
+        """Build and validate a candidate without storing or committing it.
+
+        Agent tools use this dry-run before accepting a proposal.  The normal
+        apply_patch path repeats validation and remains the only write path, so
+        a successful dry-run never advances the project head by itself.
+        """
+
+        base = self.get_current_revision(patch.project_id)
+        candidate = ProjectService(
+            PreserveCommittedCapabilities(self._capabilities, (base,))
+        ).create_patch_candidate(
+            base_revision=base,
+            patch=patch,
+            commit_id=self._id_factory("commit-validation"),
+            revision_id=self._id_factory("revision-validation"),
+            created_at=self._clock(),
+            actor_id=None,
+            require_review=False,
+        )
+        if candidate_validator is not None:
+            candidate_validator(candidate.revision)
+        return candidate.revision
 
     def restore_revision(
         self,

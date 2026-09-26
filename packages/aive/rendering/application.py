@@ -113,6 +113,27 @@ class RevisionRenderApplication:
             renderer_version=self._renderer.version,
         )
 
+    def validate_candidate(
+        self,
+        project_id: str,
+        document: ProjectDoc,
+        *,
+        quality: RenderQuality = "proxy",
+        output_range: FrameRange | None = None,
+    ) -> None:
+        """Fail before commit when a continuous-edit candidate cannot render."""
+
+        self._renderer.validate(document, output_range)
+        self._resolve_sources_from_artifact(
+            _RenderInputs(
+                project_id=project_id,
+                revision_id=document.revision_id,
+                quality=quality,
+                output_range=output_range,
+            ),
+            document,
+        )
+
     async def process(self, handle: ProgressReporter) -> dict:
         artifact = self._artifacts.get_job_artifact(handle.job_id)
         if artifact.status == "ready":

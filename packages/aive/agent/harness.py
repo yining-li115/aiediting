@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from ..contracts.conversation import (
+    AgentToolStep,
+    AgentTurnContext,
+    ConversationMessage,
+    CreateAgentTurnRequest,
+    PatchProposal,
+)
 from ..contracts.director import (
     AgentRunContext,
     FirstCutDecision,
@@ -15,6 +23,7 @@ from ..contracts.rendering import RenderArtifact, RenderReviewReport
 from ..contracts.revision import ProjectRevision
 from ..media.repository import AssetProcessingRecord
 from .context import AgentRunContextBuilder
+from .continuous_edit import ContinuousEditOutcome, ContinuousEditPipeline
 from .first_cut import build_first_cut_explanation
 from .pipeline import (
     DirectorPipeline,
@@ -30,6 +39,7 @@ from .render_autofix import (
     RenderAutoFixPipeline,
 )
 from .review import FirstCutReviewer
+from .turn_context import AgentTurnContextBuilder
 
 
 class VideoAgentHarness:
@@ -45,6 +55,7 @@ class VideoAgentHarness:
         *,
         provider: DirectorProvider,
         context_builder: AgentRunContextBuilder | None = None,
+        turn_context_builder: AgentTurnContextBuilder | None = None,
         reviewer: FirstCutReviewer | None = None,
         render_review_engine: RenderReviewEngine | None = None,
         max_repair_attempts: int = MAX_AUTOFIX_ATTEMPTS,
@@ -52,6 +63,7 @@ class VideoAgentHarness:
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder or AgentRunContextBuilder()
+        self._turn_context_builder = turn_context_builder or AgentTurnContextBuilder()
         decision_reviewer = reviewer or FirstCutReviewer()
         self._first_cut = DirectorPipeline(
             provider=provider,
@@ -64,6 +76,7 @@ class VideoAgentHarness:
             reviewer=decision_reviewer,
             max_attempts=max_render_autofix_attempts,
         )
+        self._continuous_edit = ContinuousEditPipeline(provider)
 
     @property
     def provider_name(self) -> str:
@@ -94,6 +107,38 @@ class VideoAgentHarness:
             revision=revision,
             asset_statuses=asset_statuses,
             moments=moments,
+        )
+
+    def build_turn_context(
+        self,
+        *,
+        turn_id: str,
+        request: CreateAgentTurnRequest,
+        revision: ProjectRevision,
+        moments: tuple[MomentEvidence, ...],
+        history: tuple[ConversationMessage, ...],
+    ) -> AgentTurnContext:
+        return self._turn_context_builder.build(
+            turn_id=turn_id,
+            request=request,
+            revision=revision,
+            moments=moments,
+            history=history,
+        )
+
+    async def run_edit_turn(
+        self,
+        context: AgentTurnContext,
+        *,
+        existing_steps: tuple[AgentToolStep, ...] = (),
+        on_step: Callable[[AgentToolStep], None] | None = None,
+        proposal_validator: Callable[[PatchProposal], None] | None = None,
+    ) -> ContinuousEditOutcome:
+        return await self._continuous_edit.run(
+            context,
+            existing_steps=existing_steps,
+            on_step=on_step,
+            proposal_validator=proposal_validator,
         )
 
     def can_autofix_render(

@@ -126,6 +126,7 @@ class OpenAICompatibleClient:
         self.last_usage: dict[str, int | None] = {}
         self.last_repairs = 0
         self.rate_limited = 0
+        self.retry_rate_limit_once = True
         self.last_raw: str | None = None
         self._limiter = limiter_for(card.key, card.requests_per_minute)
         # Set by the owning provider so a log line says which role and which
@@ -223,6 +224,11 @@ class OpenAICompatibleClient:
                 # the server gives one, and slow every subsequent call - not
                 # just this one - so the run recovers instead of thrashing.
                 self.rate_limited += 1
+                if not self.retry_rate_limit_once:
+                    raise QuotaExhausted(
+                        f"{self.card.key} is rate limited; an owning failover "
+                        "provider may select another pinned model"
+                    )
                 wait = _retry_after(response, default=20.0)
                 if self._limiter is not None:
                     self._limiter.penalise(wait)
@@ -299,24 +305,32 @@ class OpenAICompatibleClient:
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
+        schema_prompt = (
+            "\n\nReturn a single JSON object matching this schema:\n"
+            + json.dumps(
+                schema.model_json_schema(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         last_error: Exception | None = None
 
         for mode in modes:
             payload: dict[str, Any] = {
                 "model": self.model_id,
-                "messages": list(messages),
+                "messages": [dict(message) for message in messages],
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
             fmt = self._response_format(schema, mode)
             if fmt:
                 payload["response_format"] = fmt
-            else:
-                # No native support: state the schema in the prompt instead.
+            if mode != "json_schema":
+                # json_object only guarantees syntactic JSON.  It does not tell
+                # the model which domain envelope to return, so the schema must
+                # still be visible in the prompt just as it is in plain mode.
                 payload["messages"][0]["content"] = (
-                    system
-                    + "\n\nReturn a single JSON object matching this schema:\n"
-                    + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+                    system + schema_prompt
                 )
 
             try:

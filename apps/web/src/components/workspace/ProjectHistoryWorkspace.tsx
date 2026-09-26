@@ -35,6 +35,7 @@ import type {
   RenderArtifact,
   RestoreRevisionRequest,
 } from "@/lib/api/types";
+import { ConversationPanel } from "./ConversationPanel";
 
 interface ProjectHistoryWorkspaceProps {
   projectId: string;
@@ -68,6 +69,25 @@ function durationLabel(revision: ProjectRevision) {
   const { duration_frames: frames, output } = revision.document.timeline;
   const seconds = (frames * output.fps.den) / output.fps.num;
   return `${seconds.toFixed(seconds % 1 === 0 ? 0 : 1)}s · ${frames} frames`;
+}
+
+function previewFrameAtTime(
+  revision: ProjectRevision,
+  artifact: RenderArtifact,
+  currentTime: number,
+) {
+  const fps = revision.document.timeline.output.fps;
+  const offset = artifact.output_range?.start_frame ?? 0;
+  const duration =
+    artifact.output_range?.duration_frames ??
+    revision.document.timeline.duration_frames;
+  const elapsedFrames = Number.isFinite(currentTime)
+    ? Math.max(0, Math.floor((currentTime * fps.num) / fps.den))
+    : 0;
+  return Math.min(
+    offset + duration - 1,
+    offset + elapsedFrames,
+  );
 }
 
 async function fetchRevisionState(projectId: string, signal?: AbortSignal) {
@@ -115,6 +135,11 @@ export function ProjectHistoryWorkspace({
   const [renderArtifacts, setRenderArtifacts] = useState<RenderArtifact[]>([]);
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeDuration, setRangeDuration] = useState(90);
+  const [previewPlayhead, setPreviewPlayhead] = useState<{
+    artifactId: string;
+    revisionId: string;
+    frame: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hasActiveMedia = assetStatuses.some(
     (asset) =>
@@ -287,6 +312,27 @@ export function ProjectHistoryWorkspace({
         ),
     [renderArtifacts, selected],
   );
+  const currentPreviewPlayhead =
+    readyPreview &&
+    current &&
+    selected?.document.revision_id === current.document.revision_id &&
+    previewPlayhead?.artifactId === readyPreview.artifact_id &&
+    previewPlayhead.revisionId === current.document.revision_id
+      ? previewPlayhead.frame
+      : null;
+  const capturePreviewPlayhead = (currentTime: number) => {
+    if (!selected || !readyPreview) return;
+    const frame = previewFrameAtTime(selected, readyPreview, currentTime);
+    setPreviewPlayhead((existing) =>
+      existing?.artifactId === readyPreview.artifact_id && existing.frame === frame
+        ? existing
+        : {
+            artifactId: readyPreview.artifact_id,
+            revisionId: selected.document.revision_id,
+            frame,
+          },
+    );
+  };
   const firstReadyAsset = selected?.document.assets?.find((asset) =>
     assetStatuses.some(
       (status) => status.asset_id === asset.asset_id && status.readiness === "ready",
@@ -434,9 +480,9 @@ export function ProjectHistoryWorkspace({
         <p className="text-xs font-medium uppercase tracking-[0.14em] text-ink-faint">
           Project {projectId}
         </p>
-        <h1 className="mt-1 text-2xl font-semibold tracking-tight">Version history</h1>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight">AI editing workspace</h1>
         <p className="mt-1 text-sm text-ink-soft">
-          Inspect any committed snapshot. Restoring creates a new version and keeps the old timeline intact.
+          Direct the edit on the left, preview the selected Revision on the right, and restore any committed version without losing history.
         </p>
       </div>
 
@@ -518,6 +564,12 @@ export function ProjectHistoryWorkspace({
 
       <div className="grid min-h-[32rem] overflow-hidden rounded-[var(--radius-card)] border border-line bg-surface lg:grid-cols-[22rem_minmax(0,1fr)]">
         <section id="history" className="border-b border-line lg:border-b-0 lg:border-r">
+          <ConversationPanel
+            projectId={projectId}
+            currentRevisionId={current?.document.revision_id ?? null}
+            playheadFrame={currentPreviewPlayhead}
+            onRevisionChanged={refresh}
+          />
           <div className="border-b border-line px-5 py-4">
             <h2 className="text-sm font-semibold">Committed versions</h2>
             <p className="mt-0.5 text-xs text-ink-faint">
@@ -613,6 +665,15 @@ export function ProjectHistoryWorkspace({
                       key={readyPreview.artifact_id}
                       controls
                       playsInline
+                      onLoadedMetadata={(event) =>
+                        capturePreviewPlayhead(event.currentTarget.currentTime)
+                      }
+                      onTimeUpdate={(event) =>
+                        capturePreviewPlayhead(event.currentTarget.currentTime)
+                      }
+                      onSeeked={(event) =>
+                        capturePreviewPlayhead(event.currentTarget.currentTime)
+                      }
                       className="max-h-[32rem] w-full rounded-md object-contain"
                       src={renderContentUrl(projectId, readyPreview.artifact_id)}
                     >
