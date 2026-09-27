@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
-from aive.agent.first_cut import FirstCutBuildError, build_first_cut_patch
-from aive.contracts.director import CopyStrategy, FirstCutDecision, MusicStrategy
+from aive.agent.first_cut import build_first_cut_patch
+from aive.contracts.captions import default_caption_style
+from aive.contracts.director import (
+    CaptionEditDecision,
+    EditBlueprint,
+    EditSectionDecision,
+    FirstCutDecision,
+    MusicEditDecision,
+    SoundEffectEditDecision,
+    VisualEditDecision,
+)
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.project_doc import (
     AssetRef,
@@ -18,8 +25,10 @@ from aive.contracts.project_doc import (
     Timeline,
 )
 from aive.contracts.revision import ProjectRevision, RevisionProvenance
+from aive.contracts.time import FrameRange, SourceRange
 from aive.project.hashing import canonical_model_hash
 from aive.project.service import ProjectService
+from tests.v2_fixtures import FIXTURE_PROVENANCE, source_understanding
 
 
 NOW = datetime(2026, 9, 26, 23, 45, tzinfo=timezone.utc)
@@ -43,6 +52,7 @@ def _document() -> ProjectDoc:
             AssetRef(asset_id="asset_video", kind="video"),
             AssetRef(asset_id="asset_photo", kind="photo"),
             AssetRef(asset_id="asset_music", kind="audio", roles=("music",)),
+            AssetRef(asset_id="asset_sfx", kind="audio", roles=("sfx",)),
         ),
         timeline=Timeline(
             duration_frames=90,
@@ -76,11 +86,53 @@ def _moment(
         source=MediaSourceSpan(start=start, end=end, timescale=1_000),
         analysis_window_count=1,
         keyframe_count=1,
-        technical_quality=0.8,
-        is_usable=usable,
-        semantic_status="ready",
-        semantic="A useful scene",
-        semantic_role="detail",
+        understanding=source_understanding(
+            shot_ids=(f"{moment_id}_shot",),
+            source=MediaSourceSpan(start=start, end=end, timescale=1_000),
+            summary="A useful scene",
+            narrative_function="detail",
+            worth_using=usable,
+        ),
+    )
+
+
+def _decision(
+    *,
+    visuals: tuple[VisualEditDecision, ...],
+    duration_frames: int,
+    captions: tuple[CaptionEditDecision, ...] = (),
+    music: tuple[MusicEditDecision, ...] = (),
+    sound_effects: tuple[SoundEffectEditDecision, ...] = (),
+    summary: str = "AI first cut",
+) -> FirstCutDecision:
+    return FirstCutDecision(
+        summary=summary,
+        explanation="Created the requested first cut.",
+        edit_blueprint=EditBlueprint(
+            objective="Fulfil the test request",
+            narrative_summary=summary,
+            output_duration_frames=duration_frames,
+            sections=(
+                EditSectionDecision(
+                    section_key="section_1",
+                    output=FrameRange(
+                        start_frame=0,
+                        duration_frames=duration_frames,
+                    ),
+                    role="story",
+                    goal="Create the sequence",
+                ),
+            ),
+            visuals=visuals,
+            captions=captions,
+            caption_style=(
+                default_caption_style("caption_style_test") if captions else None
+            ),
+            music=music,
+            sound_effects=sound_effects,
+            confidence=0.9,
+            provenance=FIXTURE_PROVENANCE,
+        ),
     )
 
 
@@ -90,10 +142,25 @@ def test_builder_creates_one_valid_gapless_patch_with_source_audio() -> None:
         _moment("moment_video", "asset_video", 125, 2_125),
         _moment("moment_photo", "asset_photo", 0, 1_000),
     )
-    decision = FirstCutDecision(
-        moment_ids=("moment_video", "moment_photo"),
-        summary="AI first cut",
-        explanation="Video first, then a short photo hold.",
+    decision = _decision(
+        duration_frames=90,
+        visuals=(
+            VisualEditDecision(
+                decision_key="video_1",
+                moment_id="moment_video",
+                source=MediaSourceSpan(start=125, end=2_125),
+                output=FrameRange(start_frame=0, duration_frames=60),
+                purpose="Open on motion",
+            ),
+            VisualEditDecision(
+                decision_key="photo_1",
+                moment_id="moment_photo",
+                source=None,
+                output=FrameRange(start_frame=60, duration_frames=30),
+                purpose="Land on the detail",
+                preserve_source_audio=False,
+            ),
+        ),
     )
 
     patch = build_first_cut_patch(
@@ -135,10 +202,17 @@ def test_builder_creates_one_valid_gapless_patch_with_source_audio() -> None:
 def test_render_autofix_candidate_uses_fresh_stable_patch_identity() -> None:
     document = _document()
     moment = _moment("moment_video", "asset_video", 0, 2_000)
-    decision = FirstCutDecision(
-        moment_ids=(moment.moment_id,),
-        summary="AI first cut",
-        explanation="Use the opening.",
+    decision = _decision(
+        duration_frames=60,
+        visuals=(
+            VisualEditDecision(
+                decision_key="video_1",
+                moment_id=moment.moment_id,
+                source=moment.source,
+                output=FrameRange(start_frame=0, duration_frames=60),
+                purpose="Use the opening",
+            ),
+        ),
     )
     common = {
         "document": document,
@@ -158,7 +232,7 @@ def test_render_autofix_candidate_uses_fresh_stable_patch_identity() -> None:
     assert replacement.operations != initial.operations
 
 
-def test_builder_rejects_provider_selection_of_unusable_moment() -> None:
+def test_builder_does_not_replace_model_editorial_judgment_with_a_rule() -> None:
     document = _document()
     moment = _moment(
         "moment_rejected",
@@ -167,21 +241,29 @@ def test_builder_rejects_provider_selection_of_unusable_moment() -> None:
         1_000,
         usable=False,
     )
-    decision = FirstCutDecision(
-        moment_ids=(moment.moment_id,),
-        summary="Bad proposal",
-        explanation="Should fail closed.",
+    decision = _decision(
+        duration_frames=30,
+        summary="Deliberate exception",
+        visuals=(
+            VisualEditDecision(
+                decision_key="video_exception",
+                moment_id=moment.moment_id,
+                source=moment.source,
+                output=FrameRange(start_frame=0, duration_frames=30),
+                purpose="A deliberate contextual exception",
+            ),
+        ),
     )
 
-    with pytest.raises(FirstCutBuildError, match="not usable"):
-        build_first_cut_patch(
-            document=document,
-            moments=(moment,),
-            decision=decision,
-            run_id="run_first_cut",
-            request_id="request_first_cut",
-            asset_has_audio={"asset_video": True},
-        )
+    patch = build_first_cut_patch(
+        document=document,
+        moments=(moment,),
+        decision=decision,
+        run_id="run_first_cut",
+        request_id="request_first_cut",
+        asset_has_audio={"asset_video": True},
+    )
+    assert patch.operations
 
 
 def test_builder_materializes_asr_captions_and_authorized_music() -> None:
@@ -190,18 +272,48 @@ def test_builder_materializes_asr_captions_and_authorized_music() -> None:
     moment = moment.model_copy(
         update={"has_speech": True, "asr_text": "A real line from ASR."}
     )
-    decision = FirstCutDecision(
-        moment_ids=(moment.moment_id,),
+    decision = _decision(
+        duration_frames=90,
         summary="Captioned music cut",
-        explanation="Use ASR and the licensed music asset.",
-        copy_strategy=CopyStrategy(caption_mode="speech"),
-        music_strategy=MusicStrategy(
-            mode="music_bed",
-            asset_id="asset_music",
-            gain_db=-18,
-            fade_in_frames=15,
-            fade_out_frames=15,
-            duck_under_speech=True,
+        visuals=(
+            VisualEditDecision(
+                decision_key="video_1",
+                moment_id=moment.moment_id,
+                source=moment.source,
+                output=FrameRange(start_frame=0, duration_frames=90),
+                purpose="Carry the story",
+            ),
+        ),
+        captions=(
+            CaptionEditDecision(
+                decision_key="caption_1",
+                output=FrameRange(start_frame=0, duration_frames=90),
+                text="A real line from ASR.",
+                source="asr",
+                evidence_moment_ids=(moment.moment_id,),
+            ),
+        ),
+        music=(
+            MusicEditDecision(
+                decision_key="music_1",
+                asset_id="asset_music",
+                source=SourceRange(start=0, end=2, timescale=1),
+                output=FrameRange(start_frame=0, duration_frames=60),
+                gain_db=-18,
+                fade_in_frames=15,
+                duck_under_speech=True,
+                purpose="Build under the opening",
+            ),
+            MusicEditDecision(
+                decision_key="music_2",
+                asset_id="asset_music",
+                source=SourceRange(start=0, end=1, timescale=1),
+                output=FrameRange(start_frame=60, duration_frames=30),
+                gain_db=-18,
+                fade_out_frames=15,
+                duck_under_speech=True,
+                purpose="Resolve under the ending",
+            ),
         ),
     )
 
@@ -241,3 +353,64 @@ def test_builder_materializes_asr_captions_and_authorized_music() -> None:
     assert all(clip.ducking_group == "speech" for clip in music.clips)
     assert music.clips[0].fade_in_frames == 15
     assert music.clips[-1].fade_out_frames == 15
+
+
+def test_builder_materializes_model_selected_sound_effects() -> None:
+    document = _document()
+    moment = _moment("moment_video", "asset_video", 0, 2_000)
+    decision = _decision(
+        duration_frames=60,
+        visuals=(
+            VisualEditDecision(
+                decision_key="video_1",
+                moment_id=moment.moment_id,
+                source=moment.source,
+                output=FrameRange(start_frame=0, duration_frames=60),
+                purpose="Show the action",
+            ),
+        ),
+        sound_effects=(
+            SoundEffectEditDecision(
+                decision_key="sfx_impact",
+                asset_id="asset_sfx",
+                source=SourceRange(start=0, end=2, timescale=30),
+                output=FrameRange(start_frame=29, duration_frames=2),
+                gain_db=-8,
+                evidence_moment_ids=(moment.moment_id,),
+                purpose="Reinforce the visible action",
+            ),
+        ),
+    )
+
+    patch = build_first_cut_patch(
+        document=document,
+        moments=(moment,),
+        decision=decision,
+        run_id="run_sfx",
+        request_id="request_sfx",
+        asset_has_audio={"asset_video": True, "asset_sfx": True},
+        asset_duration_seconds={"asset_video": 2.0, "asset_sfx": 1.0},
+    )
+    base = ProjectRevision(
+        commit_id="commit_assets",
+        created_at=NOW,
+        document_hash=canonical_model_hash(document),
+        provenance=RevisionProvenance(kind="initial", origin="system"),
+        document=document,
+    )
+    result = ProjectService(AcceptCapabilities()).create_patch_candidate(
+        base_revision=base,
+        patch=patch,
+        commit_id="commit_sfx",
+        revision_id="revision_sfx",
+        created_at=NOW,
+    )
+
+    sfx = next(
+        track
+        for track in result.revision.document.timeline.tracks
+        if track.kind == "audio" and track.role == "sfx"
+    )
+    assert len(sfx.clips) == 1
+    assert sfx.clips[0].output == FrameRange(start_frame=29, duration_frames=2)
+    assert sfx.clips[0].gain_db == -8

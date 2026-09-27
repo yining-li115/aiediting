@@ -12,9 +12,11 @@ from aive.agent.provider import (
     VolcanoDirectorProvider,
 )
 from aive.agent.harness import VideoAgentHarness
+from aive.agent.preview_evidence import PreviewAnnotationImage
 from aive.contracts.conversation import (
     AgentTurnContext,
     PreviewAnnotation,
+    PreviewSpatialRegion,
     WorkspaceSelection,
 )
 from aive.contracts.director import (
@@ -42,6 +44,8 @@ from aive.contracts.project_doc import (
 from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 from aive.model_registry import ModelCard
 from aive.roles import Role
+from tests.provider_fakes import FixtureRerankProvider
+from tests.v2_fixtures import first_cut_decision, source_understanding
 
 
 def _context() -> AgentRunContext:
@@ -82,12 +86,32 @@ def _context() -> AgentRunContext:
                 source=MediaSourceSpan(start=0, end=2_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                is_usable=True,
-                semantic_status="ready",
-                semantic="Food close-up",
+                understanding=source_understanding(
+                    shot_ids=("shot_1",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="Food close-up",
+                ),
             ),
         ),
     )
+
+
+def _first_cut_answer(*, summary: str, explanation: str) -> dict:
+    decision = first_cut_decision(
+        moment_id="moment_1",
+        source=MediaSourceSpan(start=0, end=2_000),
+        duration_frames=60,
+        summary=summary,
+        explanation=explanation,
+    )
+    return {
+        "summary": summary,
+        "explanation": explanation,
+        "edit_blueprint": decision.edit_blueprint.model_dump(
+            mode="json",
+            exclude={"blueprint_version", "provenance"},
+        ),
+    }
 
 
 def _turn_context() -> AgentTurnContext:
@@ -299,6 +323,147 @@ async def test_preview_annotation_grounds_the_exact_timeline_range(
     assert "clip_audio_2" in serialized
 
 
+async def test_spatial_preview_annotation_sends_the_exact_annotated_frame(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "kind": "tool_call",
+                                    "call": {
+                                        "tool": "read_project",
+                                        "call_id": "call_read_spatial_project",
+                                    },
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-gemini-spatial-director",
+            vendor="google",
+            model_id="gemini-test-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            accepts_images=True,
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    context = _turn_context().model_copy(
+        update={
+            "instruction": "把框里的标题上移。",
+            "workspace": WorkspaceSelection(
+                revision_id="revision_assets",
+                preview_annotations=(
+                    PreviewAnnotation(
+                        annotation_id="annotation_spatial_title",
+                        revision_id="revision_assets",
+                        artifact_id="artifact_preview",
+                        output_range=FrameRange(
+                            start_frame=35,
+                            duration_frames=10,
+                        ),
+                        spatial_region=PreviewSpatialRegion(
+                            x=0.2,
+                            y=0.1,
+                            width=0.5,
+                            height=0.2,
+                        ),
+                        comment="标题挡住人物了。",
+                    ),
+                ),
+            ),
+        }
+    )
+    image_path = tmp_path / "annotation.png"
+    image_path.write_bytes(b"annotated-frame")
+
+    decision = await provider.next_edit_step(
+        context,
+        (),
+        annotation_images=(
+            PreviewAnnotationImage(
+                annotation_id="annotation_spatial_title",
+                evidence_frame=39,
+                path=image_path,
+            ),
+        ),
+    )
+
+    assert decision.kind == "tool_call"
+    content = requests[0]["messages"][-1]["content"]
+    assert any(
+        part.get("type") == "image_url"
+        and part["image_url"]["url"].startswith("data:image/png;base64,")
+        for part in content
+    )
+    serialized = json.dumps(requests[0], ensure_ascii=False)
+    assert "annotation_spatial_title" in serialized
+    assert "exact Revision frame 39" in serialized
+    assert '"evidence_frame":39' in serialized.replace("\\", "")
+
+
+async def test_spatial_preview_annotation_requires_an_image_capable_director(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv(
+        "AIVE_TEST_GOOGLE_URL",
+        "https://google.example.invalid/v1beta/openai",
+    )
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    provider = OpenAICompatibleDirectorProvider(
+        card=ModelCard(
+            key="test-text-only-director",
+            vendor="google",
+            model_id="text-only-snapshot",
+            adapter="openai_compatible",
+            roles=(Role.DIRECTOR,),
+            accepts_images=False,
+            structured_output=True,
+            base_url_env="AIVE_TEST_GOOGLE_URL",
+            api_key_env="AIVE_TEST_GOOGLE_KEY",
+        ),
+    )
+    image_path = tmp_path / "annotation.png"
+    image_path.write_bytes(b"annotated-frame")
+
+    with pytest.raises(DirectorProviderError, match="image-capable Director"):
+        await provider.next_edit_step(
+            _turn_context(),
+            (),
+            annotation_images=(
+                PreviewAnnotationImage(
+                    annotation_id="annotation_spatial_title",
+                    evidence_frame=39,
+                    path=image_path,
+                ),
+            ),
+        )
+
+
 async def test_google_director_clarifies_ungrounded_instruction_before_tools(
     monkeypatch,
 ) -> None:
@@ -422,28 +587,10 @@ async def test_google_director_allows_explicit_ordinal_target_without_workspace(
 async def test_volcano_provider_returns_typed_composite_decision(monkeypatch) -> None:
     monkeypatch.setenv("AIVE_TEST_ARK_URL", "https://ark.example.invalid/api/v3")
     monkeypatch.setenv("AIVE_TEST_ARK_KEY", "test-key")
-    answer = {
-        "moment_ids": ["moment_1"],
-        "summary": "Fast food first cut",
-        "explanation": "Open directly on the food close-up.",
-        "creative_strategy": {
-            "objective": "Make the food immediately appealing",
-            "hook": "Open on texture",
-            "pacing": "energetic",
-            "story_arc": ["hook", "detail", "payoff"],
-        },
-        "copy_strategy": {
-            "title": "Made in seconds",
-            "caption_mode": "highlights",
-            "caption_tone": "short and direct",
-        },
-        "music_strategy": {
-            "mode": "source_only",
-            "mood_tags": ["energetic"],
-            "energy_curve": "build",
-            "duck_under_speech": True,
-        },
-    }
+    answer = _first_cut_answer(
+        summary="Fast food first cut",
+        explanation="Open directly on the food close-up.",
+    )
     requests: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -474,9 +621,14 @@ async def test_volcano_provider_returns_typed_composite_decision(monkeypatch) ->
     decision = await provider.create_first_cut(_context())
 
     assert decision.moment_ids == ("moment_1",)
-    assert decision.copy_strategy.title == "Made in seconds"
+    assert decision.edit_blueprint.output_duration_frames == 60
+    assert decision.edit_blueprint.provenance.model == "ep-test-director"
     assert requests[0]["model"] == "ep-test-director"
-    assert "project_volcano" in json.dumps(requests[0], ensure_ascii=False)
+    payload = json.dumps(requests[0], ensure_ascii=False)
+    assert "project_volcano" in payload
+    assert "sound_effects" in payload
+    assert "audio_visual_sync" in payload
+    assert "Do not mechanically cut on every beat" in payload
 
 
 async def test_volcano_provider_returns_one_typed_continuous_edit_tool_call(
@@ -597,9 +749,10 @@ async def test_volcano_provider_emits_structural_patch_through_real_tool_schema(
         transport=httpx.MockTransport(handler),
     )
 
-    outcome = await VideoAgentHarness(provider=provider).run_edit_turn(
-        _turn_context()
-    )
+    outcome = await VideoAgentHarness(
+        provider=provider,
+        moment_search_provider=FixtureRerankProvider(),
+    ).run_edit_turn(_turn_context())
 
     assert outcome.proposal is not None
     assert [operation.op for operation in outcome.proposal.operations] == [
@@ -641,11 +794,10 @@ async def test_volcano_provider_repairs_rejected_render_with_typed_context(
 ) -> None:
     monkeypatch.setenv("AIVE_TEST_ARK_URL", "https://ark.example.invalid/api/v3")
     monkeypatch.setenv("AIVE_TEST_ARK_KEY", "test-key")
-    answer = {
-        "moment_ids": ["moment_1"],
-        "summary": "Stronger rendered opening",
-        "explanation": "Open directly on the subject.",
-    }
+    answer = _first_cut_answer(
+        summary="Stronger rendered opening",
+        explanation="Open directly on the subject.",
+    )
     requests: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -668,8 +820,10 @@ async def test_volcano_provider_repairs_rejected_render_with_typed_context(
         ),
         transport=httpx.MockTransport(handler),
     )
-    decision = FirstCutDecision(
-        moment_ids=("moment_1",),
+    decision = first_cut_decision(
+        moment_id="moment_1",
+        source=MediaSourceSpan(start=0, end=2_000),
+        duration_frames=60,
         summary="Rejected opening",
         explanation="Use the available shot.",
     )

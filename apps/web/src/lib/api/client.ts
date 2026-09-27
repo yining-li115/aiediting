@@ -25,18 +25,14 @@ import type {
   CreateFirstCutRequest,
   DirectorRun,
   CreateProjectRequest,
-  EditPlanSpec,
-  MaterialSegment,
   MomentEvidence,
   Patch,
   ProjectRevision,
   RenderArtifact,
   RenderTicket,
   FirstCutTicket,
-  ReferenceAnalysis,
   RestoreRevisionRequest,
   RevisionMutationResponse,
-  TimelineSpec,
   TranscriptEvidence,
   UploadAssetsRequest,
 } from "./types";
@@ -106,6 +102,8 @@ export type JobStage =
   | "generating_thumbnail"
   | "rendering_proxy"
   | "rendering_hq"
+  | "reviewing"
+  | "autofixing"
   | "done"
   | "failed";
 
@@ -406,71 +404,3 @@ export const getRevisionRender = (
 
 export const renderContentUrl = (projectId: string, artifactId: string) =>
   `${API_BASE}/projects/${pathSegment(projectId)}/renders/${pathSegment(artifactId)}/content`;
-
-export const listSegments = (projectId: string, includeRejected = false) =>
-  request<MaterialSegment[]>(
-    `/projects/${projectId}/segments?include_rejected=${includeRejected}`,
-  );
-
-export const startAnalysis = (projectId: string) =>
-  request<{ job_id: string }>(`/projects/${projectId}/analyze`, {
-    method: "POST",
-  });
-
-/* --- references ---------------------------------------------------------- */
-
-/**
- * Add a reference video. File upload only - there is deliberately no URL
- * option anywhere in this product (see TECHNICAL_PLAN section 16.1).
- */
-export const uploadReference = (projectId: string, file: File) => {
-  const form = new FormData();
-  form.append("file", file);
-  return request<{ reference_id: string; job_id: string }>(
-    `/projects/${projectId}/references`,
-    { method: "POST", body: form },
-  );
-};
-
-export const getReference = (referenceId: string) =>
-  request<ReferenceAnalysis>(`/references/${referenceId}`);
-
-/* --- generation ---------------------------------------------------------- */
-
-export interface GenerateRequest {
-  prompt?: string;
-  target_duration?: number;
-  candidates?: number;
-  keep_original_sound?: boolean;
-  reference_id?: string;
-}
-
-export interface Candidate {
-  timeline_id: string;
-  variant: string;
-  score: number;
-  dimensions: Record<string, number>;
-  duration: number;
-  clip_count: number;
-  preview_url: string | null;
-}
-
-export interface GenerateResult {
-  best: TimelineSpec;
-  plan: EditPlanSpec;
-  candidates: Candidate[];
-  render_url: string | null;
-  notes: string[];
-}
-
-export const startGeneration = (projectId: string, body: GenerateRequest) =>
-  request<{ job_id: string }>(`/projects/${projectId}/generate`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-
-/* --- media --------------------------------------------------------------- */
-
-/** Files are served by the API, never by a path into storage. */
-export const mediaUrl = (key: string) =>
-  `${API_BASE}/media/${encodeURIComponent(key)}`;

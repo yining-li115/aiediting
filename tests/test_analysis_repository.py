@@ -21,6 +21,7 @@ from aive.media.analysis_repository import (
     PersistedTranscript,
 )
 from aive.media.repository import MediaAssetRecord
+from tests.v2_fixtures import source_understanding
 
 
 @pytest.fixture
@@ -99,8 +100,11 @@ def test_persisted_moment_is_listed_and_old_job_cannot_overwrite(repositories) -
         source=source,
         analysis_window_count=2,
         keyframe_count=2,
-        semantic_status="ready",
-        semantic="walking outside",
+        understanding=source_understanding(
+            shot_ids=(shot.shot_id,),
+            source=source,
+            summary="walking outside",
+        ),
         transcript_segment_ids=("asset_a_transcript_0000",),
         has_speech=True,
         asr_text="hello outside",

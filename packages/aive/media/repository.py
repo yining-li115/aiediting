@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
 
+from ..contracts.audio import AudioAssetAnalysis
 from ..contracts.project_doc import AssetRef
 
 
@@ -58,6 +59,7 @@ class AssetProcessingRecord:
     analysis_error: str | None = None
     moment_count: int = 0
     transcript_count: int = 0
+    audio_analysis: AudioAssetAnalysis | None = None
 
 
 @dataclass(frozen=True)
@@ -120,4 +122,9 @@ class MediaAssetRepository(Protocol):
         asset_id: str,
         job_id: str,
         error: str,
+    ) -> AssetProcessingRecord: ...
+
+    def save_audio_analysis(
+        self,
+        analysis: AudioAssetAnalysis,
     ) -> AssetProcessingRecord: ...

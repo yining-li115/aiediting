@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .db.models import Job
 from .db.session import get_session_factory
 from .events import publish
-from .specs.base import new_id
+from .ids import new_id
 
 
 logger = logging.getLogger(__name__)

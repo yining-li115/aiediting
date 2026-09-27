@@ -46,7 +46,9 @@ Before any model call, `AgentRunContextBuilder` snapshots:
 - the exact base Revision and document hash;
 - ProjectIntent, output settings, explicit requirements, and style tags;
 - project-scoped ready source Asset runtime facts;
-- analyzed Moment evidence in stable Asset/source order; and
+- analyzed Moment evidence in stable Asset/source order;
+- content-hash-bound model understanding plus measured loudness, energy,
+  beat/accent, and transient evidence for authorized music/SFX Assets; and
 - stable IDs protected by ProjectDoc locks.
 
 The context is stored on the Agent Run before a decision is requested. Recovery
@@ -82,18 +84,25 @@ renderer command, SQL, executable code, or an unregistered media identity.
 The Director now materializes a speech/highlight caption strategy into one
 `caption.clean@1.0.0` CaptionTrack using ASR text attached to the selected
 Moments. Cue timing is mapped to the exact selected output clips. A music-bed
-strategy must name one exact authorized `music` Asset from the frozen context;
-the Patch builder tiles that Asset across the resulting timeline and applies
-the Director's gain, fade, and speech-ducking parameters. Unknown or unlicensed
-Asset identities still fail deterministic review.
+strategy must name one exact authorized `music` Asset from the frozen context
+and explicitly provide every source/output range, gain, fade, and
+speech-ducking parameter. SFX decisions likewise name an authorized `sfx`
+Asset, exact timing, and the source Moment evidence motivating the effect.
+The Patch builder translates those decisions into `music` and `sfx` tracks; it
+does not select, tile, align, or score audio by rule. Deliberate cut/transition
+sync cites a measured beat, accent, or transient. Deterministic review rejects
+invented signal events and incorrect source-to-output mappings, while the
+Director decides whether any synchronization is creatively appropriate.
+Unknown or unlicensed Asset identities still fail deterministic review.
 `ProjectIntent.caption_policy` and `music_policy` are also deterministic
 review inputs: `none` forbids the corresponding layer, while `auto` requires it
 when selected speech or an authorized music Asset makes it executable.
 
-`AIVE_ROLE_DIRECTOR_MODEL=doubao-vision` selects the production Volcengine Ark
-endpoint configured by `AIVE_ARK_BASE_URL`, `AIVE_ARK_API_KEY`, and
-`AIVE_ARK_MODEL_ID`. The data-sharing development endpoint is rejected for
-user projects unless a test-only opt-in is supplied explicitly.
+The active Director is the pinned `doubao-seed-2-1-pro-260915` Ark model,
+selected by the `doubao-seed-2.1-pro` ModelCard and authenticated with
+`AIVE_ARK_BASE_URL` plus `AIVE_ARK_API_KEY`. Model identity no longer comes
+from one shared `AIVE_ARK_MODEL_ID`; Pro, Lite, Embedding, and Seed-ASR have
+separate auditable cards and adapters.
 
 For internal investor-demo qualification,
 `AIVE_ROLE_DIRECTOR_MODEL=gemini-3.6-flash` may be paired with the pinned,
@@ -135,17 +144,21 @@ The post-render review has two layers:
   representative non-black/non-flat frames, expected audio, and a sharpness
   warning; and
 - the configured `reviewer` provider may inspect the proxy or extracted frames
-  and return typed creative issues.
+  and return typed creative issues. A video-capable Reviewer that declares
+  audio-reading support also reviews music fit, dialogue intelligibility,
+  source-audio continuity, fades, ducking, picture-music synchronization, and
+  SFX appropriateness. Frame-only review records that audio was not reviewed.
 
 An error issue rejects the candidate. An accepted report permits
 `ProjectRevisionApplication.accept_candidate` to perform the normal atomic
 head compare-and-swap. A rejected render, failed render, failed Reviewer, or
 stale-head conflict never makes the candidate current.
 
-The default Reviewer is intentionally offline: it performs only deterministic
-inspection and records `visual_review_performed=false`. Setting
-`AIVE_ROLE_REVIEWER_MODEL=doubao-vision` selects the Volcengine multimodal
-provider. Default tests never make paid model calls.
+The active creative Reviewer is the same pinned Pro model, behind the Reviewer
+provider boundary. Deterministic inspection still runs first, but there is no
+offline substitute for creative visual judgment. Missing credentials or an
+invalid model response fail visibly and preserve the prior committed Revision.
+Default tests inject fixtures or mock HTTP transports and never make paid calls.
 
 When every blocking issue is marked `repairable`, the Harness may start one
 durable `render_autofix` Job. The Director receives the original frozen
@@ -234,13 +247,14 @@ documented in `CONTINUOUS_EDITING_V1.md`. Reference remake remains later work.
 ## 11. Remaining boundary
 
 The first-cut model/context/review path is implemented, but production model
-quality is not claimed until a real golden-footage run succeeds. Default
-offline review does not claim visual judgment.
-Animated/word-timed captions, a searchable licensed music catalog with stored
-license evidence, more capable effect-aware repair,
+quality is not claimed until a real golden-footage run succeeds. Render review
+requires a configured multimodal model and fails visibly when it is unavailable;
+there is no offline creative-review substitute.
+Animated/word-timed captions, a searchable licensed music/SFX catalog with
+stored license evidence, more capable effect-aware repair,
 full workspace selection, and the wider continuous-edit operation set belong
 to following slices. The formal continuous-edit schema already includes
 clip-boundary Trim and whole-clip Move/Delete. A real Gemini model has completed
-one isolated whole-clip Delete turn through ProjectService, Revision, and
-preview enqueue; Trim, Move, multi-turn behavior, real footage, and final
-production-model selection remain unqualified.
+an isolated multi-turn Trim, Move, Delete, Replace, Crop, Speed, Gain and Fade
+run through ProjectService, immutable Revisions, and revision-bound previews.
+Investor-demo footage and final production-model selection remain unqualified.

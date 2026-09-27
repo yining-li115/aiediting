@@ -14,21 +14,27 @@ from pathlib import Path
 import httpx
 import pytest
 
-from aive.contracts.moments import MediaSourceSpan, ShotObservation
+from aive.contracts.moments import (
+    AudioEvidence,
+    MediaEvidence,
+    MediaSourceSpan,
+    ShotObservation,
+)
 from aive.model_registry import ModelCard
 from aive.providers.base import CostRecord, set_cost_sink
 from aive.providers.openai_compatible import (
-    Analysis,
     OpenAICompatibleASRProvider,
+    OpenAICompatibleAudioProvider,
     OpenAICompatibleClient,
-    OpenAICompatibleCriticProvider,
     OpenAICompatibleMaterialProvider,
     ProviderConfigError,
+    ProviderRequestRejected,
     QuotaExhausted,
+    SourceUnderstandingAnswer,
     _extract_json,
 )
 from aive.roles import Role
-from aive.specs.segment import RawSegment
+from tests.v2_fixtures import source_understanding
 
 
 def make_card(structured: bool = True) -> ModelCard:
@@ -37,7 +43,7 @@ def make_card(structured: bool = True) -> ModelCard:
         vendor="test",
         model_id="test-model-2026-01-01",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.CRITIC),
+        roles=(Role.MATERIAL,),
         accepts_images=True,
         structured_output=structured,
         base_url_env="AIVE_TEST_BASE_URL",
@@ -52,6 +58,19 @@ def make_asr_card() -> ModelCard:
         model_id="test-asr-2026-01-01",
         adapter="openai_compatible",
         roles=(Role.ASR,),
+        base_url_env="AIVE_TEST_BASE_URL",
+        api_key_env="AIVE_TEST_API_KEY",
+    )
+
+
+def make_audio_card() -> ModelCard:
+    return ModelCard(
+        key="test-audio",
+        vendor="test",
+        model_id="test-audio-2026-01-01",
+        adapter="openai_compatible",
+        roles=(Role.AUDIO,),
+        structured_output=True,
         base_url_env="AIVE_TEST_BASE_URL",
         api_key_env="AIVE_TEST_API_KEY",
     )
@@ -86,15 +105,30 @@ def reply(content: str, prompt_tokens=120, completion_tokens=40) -> httpx.Respon
 
 GOOD = json.dumps(
     {
-        "semantic": "a bowl of ramen on a wooden table",
-        "semantic_role": "food",
-        "shot_type": "close_up",
-        "people": 0,
-        "emotion": ["warm"],
-        "interestingness": 0.82,
-        "composition_score": 0.75,
+        "summary": "a bowl of ramen on a wooden table",
+        "subjects": ["ramen"],
+        "actions": [],
+        "events": [],
+        "narrative_function": "an appetizing detail",
+        "visual_language": ["intimate close detail"],
+        "camera_language": "still and attentive",
+        "emotions": ["warm"],
+        "audio_meaning": [],
+        "editorial_value": "a strong sensory insert",
+        "recommended_uses": ["food detail"],
+        "avoid_uses": [],
         "worth_using": True,
-        "reason": "appealing detail shot",
+        "confidence": 0.82,
+        "uncertainty": [],
+        "evidence": [
+            {
+                "evidence_id": "evidence_1",
+                "kind": "visual_sample",
+                "description": "the supplied frame",
+                "source": {"start": 0, "end": 3000, "timescale": 1000},
+                "shot_ids": ["shot_1"],
+            }
+        ],
     }
 )
 
@@ -113,9 +147,19 @@ def keyframe(tmp_path: Path) -> Path:
     return path
 
 
-def segment() -> RawSegment:
-    return RawSegment(
-        segment_id="seg_1", project_id="p", asset_id="a", start=0.0, end=3.0
+def evidence() -> MediaEvidence:
+    return MediaEvidence(
+        evidence_id="evidence_1",
+        project_id="p",
+        asset_id="a",
+        asset_kind="video",
+        source=MediaSourceSpan(start=0, end=3_000),
+        shot_ids=("shot_1",),
+        sample_ids=("frame_1",),
+        width=1920,
+        height=1080,
+        fps=30,
+        has_audio=False,
     )
 
 
@@ -167,13 +211,120 @@ async def test_asr_upload_returns_window_relative_transcript(tmp_path, cost_log)
     assert result[0].source.end == 2_000
     assert result[0].language == "en"
     assert result[0].emotion == "neutral"
-    input_audio = seen[0]["messages"][0]["content"][0]
+    assert seen[0]["messages"][0]["content"][0]["type"] == "text"
+    input_audio = seen[0]["messages"][0]["content"][1]
     assert input_audio["type"] == "input_audio"
-    assert input_audio["input_audio"]["data"].startswith(
-        "data:audio/wav;base64,"
-    )
+    assert input_audio["input_audio"]["format"] == "wav"
+    assert not input_audio["input_audio"]["data"].startswith("data:")
+    assert "asr_options" not in seen[0]
     assert cost_log[0].role == "asr"
     assert cost_log[0].seconds_processed == 2.0
+
+
+async def test_asr_rejected_payload_fails_once_with_provider_detail(tmp_path):
+    audio = tmp_path / "window.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\0\0" * 16_000)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            400,
+            json={"error": {"message": "unsupported audio format"}},
+        )
+
+    provider = OpenAICompatibleASRProvider(
+        make_asr_card(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ProviderRequestRejected, match="unsupported audio format"):
+        await provider.transcribe(audio)
+    assert calls == 1
+
+
+async def test_asr_accepts_provider_no_content_as_no_speech(tmp_path):
+    audio = tmp_path / "silence.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\0\0" * 16_000)
+    provider = OpenAICompatibleASRProvider(
+        make_asr_card(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"finish_reason": "stop", "message": {"role": "assistant"}}
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+                },
+            )
+        ),
+    )
+
+    assert await provider.transcribe(audio) == ()
+
+
+async def test_audio_understanding_uses_raw_audio_and_preserves_evidence(
+    tmp_path, cost_log
+):
+    audio = tmp_path / "source.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\0\0" * 16_000)
+    supplied = AudioEvidence(
+        evidence_id="audio_evidence_1",
+        project_id="project_1",
+        asset_id="asset_1",
+        source=MediaSourceSpan(start=1_000, end=2_000),
+        transcript_text="a spoken line",
+    )
+    answer = json.dumps(
+        {
+            "evidence_id": "audio_evidence_1",
+            "source": {"start": 1000, "end": 2000, "timescale": 1000},
+            "summary": "A calm spoken line over room ambience.",
+            "speech_meaning": ["The speaker finishes a thought."],
+            "sound_events": ["quiet room ambience"],
+            "music_description": None,
+            "rhythm_and_energy": "low and steady",
+            "emotions": ["calm"],
+            "editorial_value": "Useful as synchronized production sound.",
+            "confidence": 0.9,
+            "uncertainty": [],
+        }
+    )
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return reply(answer)
+
+    provider = OpenAICompatibleAudioProvider(
+        make_audio_card(),
+        transport=httpx.MockTransport(handler),
+        project_id="project_1",
+    )
+
+    result = await provider.understand_audio(supplied, audio)
+
+    assert result.evidence_id == supplied.evidence_id
+    assert result.source == supplied.source
+    assert result.sound_events == ("quiet room ambience",)
+    content = seen[0]["messages"][1]["content"]
+    assert content[1]["type"] == "input_audio"
+    assert not content[1]["input_audio"]["data"].startswith("data:")
+    assert cost_log[0].role == "audio"
 
 
 async def test_material_analysis_maps_onto_the_domain_model(keyframe, cost_log):
@@ -186,12 +337,11 @@ async def test_material_analysis_maps_onto_the_domain_model(keyframe, cost_log):
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler), project_id="p1"
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
+    result = await provider.understand_source(evidence(), [keyframe])
 
-    assert result.semantic_role == "food"
-    assert result.shot_type == "close_up"
-    assert result.interestingness == pytest.approx(0.82)
-    assert result.composition_score == pytest.approx(0.75)
+    assert result.summary == "a bowl of ramen on a wooden table"
+    assert result.narrative_function == "an appetizing detail"
+    assert result.confidence == pytest.approx(0.82)
 
     payload = seen[0]
     assert payload["model"] == "test-model-2026-01-01"
@@ -206,8 +356,7 @@ async def test_material_provider_groups_ordered_shot_observations(cost_log):
             "groups": [
                 {
                     "shot_ids": ["shot_0", "shot_1"],
-                    "semantic": "one continuous explanation",
-                    "semantic_role": "person_activity",
+                    "understanding": json.loads(GOOD),
                 }
             ]
         }
@@ -221,13 +370,21 @@ async def test_material_provider_groups_ordered_shot_observations(cost_log):
         ShotObservation(
             shot_id="shot_0",
             source=MediaSourceSpan(start=0, end=1_000),
-            visual_semantic="speaker starts a point",
+            understanding=source_understanding(
+                shot_ids=("shot_0",),
+                source=MediaSourceSpan(start=0, end=1_000),
+                summary="speaker starts a point",
+            ),
             transcript="first sentence",
         ),
         ShotObservation(
             shot_id="shot_1",
             source=MediaSourceSpan(start=1_000, end=2_000),
-            visual_semantic="speaker finishes the point",
+            understanding=source_understanding(
+                shot_ids=("shot_1",),
+                source=MediaSourceSpan(start=1_000, end=2_000),
+                summary="speaker finishes the point",
+            ),
             transcript="second sentence",
         ),
     )
@@ -235,7 +392,7 @@ async def test_material_provider_groups_ordered_shot_observations(cost_log):
     groups = await provider.group_moments(observations)
 
     assert groups[0].shot_ids == ("shot_0", "shot_1")
-    assert groups[0].semantic == "one continuous explanation"
+    assert groups[0].understanding.summary == "a bowl of ramen on a wooden table"
     assert cost_log[0].role == "material"
 
 
@@ -245,7 +402,7 @@ async def test_token_usage_reaches_the_cost_record(keyframe, cost_log):
         transport=httpx.MockTransport(lambda r: reply(GOOD, 200, 50)),
         project_id="p1",
     )
-    await provider.analyze_segment(segment(), [keyframe])
+    await provider.understand_source(evidence(), [keyframe])
 
     assert len(cost_log) == 1
     record = cost_log[0]
@@ -274,14 +431,14 @@ async def test_falls_back_when_json_schema_is_rejected(keyframe):
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler)
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
+    result = await provider.understand_source(evidence(), [keyframe])
 
     assert attempts == ["json_schema", "json_object"]
-    assert result.semantic_role == "food"
+    assert result.narrative_function == "an appetizing detail"
     assert "Return a single JSON object matching this schema" in (
         payloads[1]["messages"][0]["content"]
     )
-    assert '"semantic_role"' in payloads[1]["messages"][0]["content"]
+    assert '"narrative_function"' in payloads[1]["messages"][0]["content"]
 
 
 async def test_card_without_structured_output_skips_json_schema(keyframe):
@@ -297,7 +454,7 @@ async def test_card_without_structured_output_skips_json_schema(keyframe):
     provider = OpenAICompatibleMaterialProvider(
         make_card(structured=False), transport=httpx.MockTransport(handler)
     )
-    await provider.analyze_segment(segment(), [keyframe])
+    await provider.understand_source(evidence(), [keyframe])
     assert attempts == ["json_object"]
     assert "Return a single JSON object matching this schema" in (
         payloads[0]["messages"][0]["content"]
@@ -312,8 +469,8 @@ async def test_prose_wrapped_json_is_still_accepted(keyframe):
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(lambda r: reply(wrapped))
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
-    assert result.semantic_role == "food"
+    result = await provider.understand_source(evidence(), [keyframe])
+    assert result.narrative_function == "an appetizing detail"
 
 
 async def test_invalid_response_is_repaired_once(keyframe):
@@ -323,72 +480,55 @@ async def test_invalid_response_is_repaired_once(keyframe):
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         if calls["n"] == 1:
-            return reply('{"semantic": "missing everything else"}')
+            return reply('{"summary": "missing everything else"}')
         return reply(GOOD)
 
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler)
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
-    assert result.semantic_role == "food"
+    result = await provider.understand_source(evidence(), [keyframe])
+    assert result.narrative_function == "an appetizing detail"
     assert calls["n"] == 2
 
 
-async def test_invented_labels_are_rejected_by_the_schema(keyframe):
-    """The vocabulary belongs in the schema, where the model can see it.
-
-    The first real call answered semantic_role with "Attempts to capture the
-    atmosphere of a heavy downpour" - accurate, unusable, and worth 0.35 of
-    the matcher's decision weight. Typing the field to the enum turns that
-    into a validation failure the model gets a chance to correct.
-    """
+async def test_creative_vocabulary_is_not_reduced_to_enums(keyframe):
     calls = {"n": 0}
     odd = json.loads(GOOD)
-    odd["shot_type"] = "Low-angle ground-level medium shot"
-    odd["semantic_role"] = "Attempts to capture the atmosphere of rain"
+    odd["visual_language"] = ["low-angle ground-level intimacy"]
+    odd["narrative_function"] = "holds the atmosphere of heavy rain"
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        return reply(json.dumps(odd) if calls["n"] == 1 else GOOD)
+        return reply(json.dumps(odd))
 
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler)
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
+    result = await provider.understand_source(evidence(), [keyframe])
 
-    assert calls["n"] == 2, "the invalid answer should have been sent back"
-    assert result.shot_type == "close_up"
+    assert calls["n"] == 1
+    assert result.visual_language == ("low-angle ground-level intimacy",)
 
 
-def test_the_vocabulary_is_in_the_json_schema() -> None:
-    """A plain `str` reaches the model as an unconstrained field, and a
-    capable model then answers it well - in its own words."""
-    schema = Analysis.model_json_schema()
+def test_creative_fields_are_free_language_in_the_json_schema() -> None:
+    schema = SourceUnderstandingAnswer.model_json_schema()
 
-    def enum_of(field: str) -> list[str]:
-        prop = schema["properties"][field]
-        if "enum" in prop:
-            return prop["enum"]
-        ref = prop.get("$ref", "").rsplit("/", 1)[-1]
-        return schema.get("$defs", {}).get(ref, {}).get("enum", [])
-
-    assert "close_up" in enum_of("shot_type")
-    assert "food" in enum_of("semantic_role")
+    assert schema["properties"]["narrative_function"]["type"] == "string"
+    assert "enum" not in schema["properties"]["narrative_function"]
 
 
 def test_scores_are_bounded_in_the_schema() -> None:
     """The first real call answered on a 0-10 scale. Clamping afterwards would
     have flattened every score to 1.0 with nothing to show it happened."""
-    schema = Analysis.model_json_schema()
-    for field in ("interestingness", "composition_score"):
-        assert schema["properties"][field]["minimum"] == 0.0
-        assert schema["properties"][field]["maximum"] == 1.0
+    schema = SourceUnderstandingAnswer.model_json_schema()
+    assert schema["properties"]["confidence"]["minimum"] == 0.0
+    assert schema["properties"]["confidence"]["maximum"] == 1.0
 
 
 async def test_out_of_range_scores_are_rejected(keyframe):
     calls = {"n": 0}
     over = json.loads(GOOD)
-    over["interestingness"] = 2.1
+    over["confidence"] = 2.1
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
@@ -397,23 +537,21 @@ async def test_out_of_range_scores_are_rejected(keyframe):
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler)
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
+    result = await provider.understand_source(evidence(), [keyframe])
     assert calls["n"] == 2
-    assert 0.0 <= result.interestingness <= 1.0
+    assert 0.0 <= result.confidence <= 1.0
 
 
-async def test_worth_using_false_is_recorded_but_does_not_reject(keyframe):
-    """The deterministic pass owns is_usable; a wrong model must not empty the pool."""
+async def test_worth_using_is_a_model_authored_judgment(keyframe):
     verdict = json.loads(GOOD)
     verdict["worth_using"] = False
-    verdict["reason"] = "the ground while walking"
+    verdict["editorial_value"] = "The model would avoid this source."
     provider = OpenAICompatibleMaterialProvider(
         make_card(),
         transport=httpx.MockTransport(lambda r: reply(json.dumps(verdict))),
     )
-    result = await provider.analyze_segment(segment(), [keyframe])
-    assert result.reject_reason is not None
-    assert "model:" in result.reject_reason
+    result = await provider.understand_source(evidence(), [keyframe])
+    assert result.worth_using is False
 
 
 # --- configuration ---------------------------------------------------------
@@ -426,35 +564,12 @@ def test_missing_credentials_fail_loudly(monkeypatch):
         _ = provider.client.api_key
 
 
-# --- critic ----------------------------------------------------------------
-
-
-async def test_critic_normalises_its_verdict():
-    answer = json.dumps(
-        {"choice": "a", "reasons": ["rhythm"], "confidence": 1.4, "explanation": "x"}
-    )
-    provider = OpenAICompatibleCriticProvider(
-        make_card(), transport=httpx.MockTransport(lambda r: reply(answer))
-    )
-    verdict = await provider.compare({}, {}, {"goal": "a travel vlog"})
-    assert verdict["choice"] == "A"
-    assert verdict["confidence"] == 1.0  # clamped
-
-
-async def test_critic_unknown_choice_becomes_tie():
-    answer = json.dumps({"choice": "both are fine", "reasons": [], "confidence": 0.1})
-    provider = OpenAICompatibleCriticProvider(
-        make_card(), transport=httpx.MockTransport(lambda r: reply(answer))
-    )
-    assert (await provider.compare({}, {}, {}))["choice"] == "tie"
-
-
 def test_extract_json_rejects_a_response_with_no_object():
     with pytest.raises(ValueError):
         _extract_json("I cannot help with that.")
 
 
-async def test_config_errors_are_not_retried(monkeypatch, cost_log):
+async def test_config_errors_are_not_retried(monkeypatch, cost_log, keyframe):
     """An unset variable does not become set by asking three times."""
     monkeypatch.delenv("AIVE_TEST_BASE_URL", raising=False)
     calls = {"n": 0}
@@ -467,7 +582,7 @@ async def test_config_errors_are_not_retried(monkeypatch, cost_log):
         make_card(), transport=httpx.MockTransport(handler)
     )
     with pytest.raises(ProviderConfigError):
-        await provider.analyze_segment(segment(), [])
+        await provider.understand_source(evidence(), [keyframe])
     assert calls["n"] == 0
     assert cost_log and cost_log[0].retries == 0
 
@@ -530,7 +645,7 @@ async def test_429_penalty_slows_every_later_call():
     assert slept, "the next caller should have been made to wait"
 
 
-async def test_429_is_retried_and_slows_later_calls(monkeypatch):
+async def test_429_is_retried_and_slows_later_calls(monkeypatch, keyframe):
     from aive.providers import ratelimit
     import aive.providers.openai_compatible as oc
 
@@ -553,9 +668,9 @@ async def test_429_is_retried_and_slows_later_calls(monkeypatch):
     provider = OpenAICompatibleMaterialProvider(
         make_card(), transport=httpx.MockTransport(handler)
     )
-    result = await provider.analyze_segment(segment(), [])
+    result = await provider.understand_source(evidence(), [keyframe])
 
-    assert result.semantic_role == "food"
+    assert result.narrative_function == "an appetizing detail"
     assert calls["n"] == 2
     assert 3.0 in slept  # Retry-After was honoured rather than a fixed guess
     assert provider.throttled == 1

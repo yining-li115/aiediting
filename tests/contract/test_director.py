@@ -8,19 +8,16 @@ from pydantic import ValidationError
 from aive.contracts.director import (
     AgentAssetContext,
     AgentRunContext,
-    CopyStrategy,
     CreateFirstCutRequest,
-    CreativeStrategy,
     DirectorReview,
     DirectorReviewIssue,
     DirectorRun,
-    FirstCutDecision,
-    MusicStrategy,
     RenderAutoFixContext,
 )
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.project_doc import OutputSettings, ProjectIntent, Rational
 from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
+from tests.v2_fixtures import first_cut_decision, source_understanding
 
 
 NOW = datetime(2026, 9, 26, 23, 30, tzinfo=timezone.utc)
@@ -41,13 +38,15 @@ def test_first_cut_request_names_an_exact_base_revision_and_is_closed() -> None:
         )
 
 
-def test_first_cut_decision_rejects_duplicate_moments() -> None:
-    with pytest.raises(ValidationError, match="duplicate moments"):
-        FirstCutDecision(
-            moment_ids=("moment_1", "moment_1"),
-            summary="First cut",
-            explanation="Use the strongest footage.",
-        )
+def test_first_cut_decision_contains_a_complete_explicit_edit_blueprint() -> None:
+    decision = first_cut_decision(
+        moment_id="moment_1",
+        source=MediaSourceSpan(start=0, end=3_000),
+        duration_frames=90,
+    )
+
+    assert decision.moment_ids == ("moment_1",)
+    assert decision.edit_blueprint.output_duration_frames == 90
 
 
 def test_agent_run_context_is_closed_and_project_scoped() -> None:
@@ -88,7 +87,10 @@ def test_agent_run_context_is_closed_and_project_scoped() -> None:
                 source=MediaSourceSpan(start=0, end=3_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                semantic_status="ready",
+                understanding=source_understanding(
+                    shot_ids=("shot_1",),
+                    source=MediaSourceSpan(start=0, end=3_000),
+                ),
             ),
         ),
     )
@@ -98,31 +100,14 @@ def test_agent_run_context_is_closed_and_project_scoped() -> None:
         AgentRunContext.model_validate({**context.model_dump(), "chat_history": []})
 
 
-def test_first_cut_decision_carries_professional_strategies() -> None:
-    decision = FirstCutDecision(
-        moment_ids=("moment_1",),
-        summary="Energetic travel first cut",
-        explanation="Open on movement and finish on the destination.",
-        creative_strategy=CreativeStrategy(
-            objective="Show a compact arrival story",
-            hook="Start with immediate motion",
-            pacing="energetic",
-            story_arc=("arrival", "discovery", "payoff"),
-        ),
-        copy_strategy=CopyStrategy(
-            title="A fast arrival",
-            caption_mode="highlights",
-            caption_tone="concise",
-        ),
-        music_strategy=MusicStrategy(
-            mode="source_only",
-            energy_curve="build",
-        ),
+def test_first_cut_decision_keeps_model_provenance() -> None:
+    decision = first_cut_decision(
+        moment_id="moment_1",
+        source=MediaSourceSpan(start=0, end=3_000),
+        duration_frames=90,
     )
 
-    assert decision.creative_strategy.pacing == "energetic"
-    assert decision.copy_strategy.caption_mode == "highlights"
-    assert decision.music_strategy.energy_curve == "build"
+    assert decision.edit_blueprint.provenance.provider == "test-fixture"
 
 
 def test_review_cannot_accept_error_issues() -> None:
@@ -159,10 +144,10 @@ def test_committed_run_requires_patch_revision_and_render_identity() -> None:
 
 
 def test_render_autofix_context_requires_repairable_rejected_review() -> None:
-    decision = FirstCutDecision(
-        moment_ids=("moment_1",),
-        summary="First cut",
-        explanation="Use the opening.",
+    decision = first_cut_decision(
+        moment_id="moment_1",
+        source=MediaSourceSpan(start=0, end=3_000),
+        duration_frames=90,
     )
     review = RenderReviewReport(
         review_id="review_rejected",

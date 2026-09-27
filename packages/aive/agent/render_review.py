@@ -5,7 +5,6 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from math import log10
 from pathlib import Path
 from typing import Protocol
 
@@ -23,8 +22,6 @@ from ..contracts.revision import ProjectRevision
 from ..contracts.time import FrameRange
 from ..contracts.timeline import AudioTrack
 from ..material.probe import ffprobe
-from ..providers.base import BaseProvider
-from ..roles import Role
 
 
 SAMPLE_FRACTIONS = (0.05, 0.25, 0.5, 0.75, 0.95)
@@ -56,36 +53,8 @@ class RenderReviewOutcome:
     report: RenderReviewReport
 
 
-class OfflineRenderReviewerProvider(BaseProvider):
-    """Honest offline fallback: technical checks only, no visual claim."""
-
-    role = Role.REVIEWER
-    name = "offline-render-reviewer"
-    version = "1.0.0"
-
-    async def review(
-        self,
-        context: RenderReviewContext,
-        media_path: Path,
-        sample_paths: tuple[Path, ...],
-    ) -> RenderCreativeReview:
-        async def call() -> RenderCreativeReview:
-            return RenderCreativeReview(
-                visual_review_performed=False,
-                summary=(
-                    "Deterministic render checks passed; multimodal creative review "
-                    "was not performed by the offline provider."
-                ),
-            )
-
-        return await self._guarded(
-            call,
-            project_id=context.project_id,
-        )
-
-
 class OpenCVRenderInspector:
-    """Measure decode, timing, dimensions, audio presence, and sampled pixels."""
+    """Measure only decode, timing, dimensions, streams, and sample identity."""
 
     def inspect(
         self,
@@ -118,24 +87,12 @@ class OpenCVRenderInspector:
             raise ValueError("rendered artifact cannot be decoded")
         sample_paths: list[Path] = []
         sampled_offsets: list[float] = []
-        black = 0
-        flat = 0
-        sharpness: list[float] = []
         try:
             for index, offset in enumerate(offsets):
                 capture.set(cv2.CAP_PROP_POS_MSEC, max(0, offset) * 1_000)
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     continue
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                mean = float(gray.mean())
-                deviation = float(gray.std())
-                black += int(mean < 8)
-                flat += int(deviation < 5)
-                variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                sharpness.append(
-                    0.0 if variance <= 0 else min(1.0, max(0.0, log10(variance) / 3.5))
-                )
                 path = sample_dir / f"sample_{index:02d}.jpg"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if cv2.imwrite(str(path), frame):
@@ -143,7 +100,7 @@ class OpenCVRenderInspector:
                     sampled_offsets.append(offset)
         finally:
             capture.release()
-        count = len(sharpness)
+        count = len(sample_paths)
         return (
             RenderInspection(
                 duration_seconds=duration,
@@ -155,9 +112,6 @@ class OpenCVRenderInspector:
                     stream.get("codec_type") == "audio" for stream in streams
                 ),
                 sampled_frame_count=count,
-                black_frame_ratio=black / count if count else 1,
-                flat_frame_ratio=flat / count if count else 1,
-                mean_sharpness=sum(sharpness) / count if count else 0,
                 sample_offsets_seconds=tuple(sampled_offsets),
             ),
             tuple(sample_paths),
@@ -174,7 +128,11 @@ class RenderReviewEngine:
         provider: RenderReviewerProvider | None = None,
     ) -> None:
         self._inspector = inspector or OpenCVRenderInspector()
-        self._provider = provider or OfflineRenderReviewerProvider()
+        if provider is None:
+            raise ValueError(
+                "RenderReviewEngine requires a configured multimodal Reviewer"
+            )
+        self._provider = provider
 
     @property
     def provider_name(self) -> str:
@@ -202,6 +160,7 @@ class RenderReviewEngine:
             creative = (
                 RenderCreativeReview(
                     visual_review_performed=False,
+                    audio_review_performed=False,
                     summary="Multimodal review was skipped because technical checks failed.",
                 )
                 if blocking
@@ -225,6 +184,7 @@ class RenderReviewEngine:
             artifact_id=artifact.artifact_id,
             accepted=accepted,
             visual_review_performed=creative.visual_review_performed,
+            audio_review_performed=creative.audio_review_performed,
             issues=issues,
             summary=f"{technical_summary} {creative.summary}"[:2_000],
             provider=self._provider.name,
@@ -306,26 +266,6 @@ def _technical_issues(
                 repairable=False,
             )
         )
-    if measured.black_frame_ratio >= 0.4:
-        issues.append(
-            RenderReviewIssue(
-                code="excessive_black_frames",
-                severity="error",
-                source="technical",
-                message="Too many representative frames are effectively black.",
-                repairable=True,
-            )
-        )
-    if measured.flat_frame_ratio >= 0.6:
-        issues.append(
-            RenderReviewIssue(
-                code="excessive_flat_frames",
-                severity="error",
-                source="technical",
-                message="Too many representative frames contain almost no detail.",
-                repairable=True,
-            )
-        )
     if context.expects_audio and not measured.has_audio:
         issues.append(
             RenderReviewIssue(
@@ -334,16 +274,6 @@ def _technical_issues(
                 source="technical",
                 message="The ProjectDoc contains active audio but the render has no audio stream.",
                 repairable=False,
-            )
-        )
-    if measured.mean_sharpness < 0.12:
-        issues.append(
-            RenderReviewIssue(
-                code="low_output_sharpness",
-                severity="warning",
-                source="technical",
-                message="Representative render frames appear unusually soft.",
-                repairable=True,
             )
         )
     return tuple(issues)

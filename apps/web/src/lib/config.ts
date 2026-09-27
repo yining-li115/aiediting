@@ -17,8 +17,7 @@ export const APP_NAME = "Video AI Studio";
 
 /* --- prompt --------------------------------------------------------------- */
 
-// TODO 硬编码: prompt character limit. The backend does not enforce one, so
-// this is a UI-only constraint copied from the mock.
+// TODO 硬编码: prompt character limit. The backend does not enforce one yet.
 export const PROMPT_MAX_CHARS = 2000;
 
 // TODO 硬编码: placeholder copy.
@@ -33,40 +32,37 @@ export const PROMPT_PLACEHOLDER = "Describe the video you want to make...";
 export const UPLOAD_LIMITS = {
   material: {
     accept: "video/mp4,video/quicktime,image/jpeg,image/png",
-    supportsLabel: "Supports: MP4, MOV, JPG, PNG",
-    maxSizeLabel: "Up to 10GB per file",
   },
   style: {
     accept: "video/mp4,video/quicktime",
-    supportsLabel: "Supports: MP4, MOV",
-    maxSizeLabel: "Up to 5GB per file",
   },
   remake: {
     accept: "video/mp4,video/quicktime",
-    supportsLabel: "Supports: MP4, MOV",
-    maxSizeLabel: "Up to 5GB per file",
   },
   music: {
     accept: "audio/mpeg,audio/mp4,audio/wav,audio/aac,audio/flac,audio/ogg",
-    supportsLabel: "Supports: MP3, WAV, M4A, AAC, FLAC, OGG",
-    maxSizeLabel: "Use owned or licensed music",
   },
 } as const;
 
-// TODO 硬编码: how many thumbnails to show before collapsing into "+N".
-export const THUMBNAIL_PREVIEW_COUNT = 4;
-
 /* --- video settings ------------------------------------------------------- */
 
-// TODO 硬编码: the backend supports 20-90s (TECHNICAL_PLAN 1.5) and clamps
-// anything outside that. These four options are the mock's; 15s is below the
-// supported minimum and would be silently raised to 20s by the intent parser.
-export const VIDEO_LENGTHS = [
-  { value: 15, label: "15 seconds" },
-  { value: 30, label: "30 seconds" },
-  { value: 45, label: "45 seconds" },
-  { value: 60, label: "60 seconds" },
-] as const;
+// ProjectDoc deliberately has no maximum target duration. The browser accepts
+// any positive minute value; model input windows and preview ranges are
+// separate implementation details and must not become a project-length cap.
+export const TARGET_DURATION_INPUT = {
+  // TODO 硬编码: UI state stores whole seconds before creation converts to frames.
+  minMinutes: 1 / 60,
+  // TODO 硬编码: arrow-key increment; users may still type any positive value.
+  stepMinutes: 0.5,
+} as const;
+
+export function formatTargetDuration(totalSeconds: number): string {
+  const roundedSeconds = Math.max(1, Math.round(totalSeconds));
+  if (roundedSeconds < 60) return `${roundedSeconds}s`;
+  const minutes = Math.floor(roundedSeconds / 60);
+  const seconds = roundedSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
 
 // TODO 硬编码: style options. The backend's vocabulary is KNOWN_STYLES in
 // specs/enums.py (travel, daily, relaxed, energetic, cinematic, minimal, warm,
@@ -128,23 +124,6 @@ export const DEFAULT_SETTINGS = {
   soundEffects: false,
 } as const;
 
-/* --- features not wired to the backend ------------------------------------ */
-
-// TODO 硬编码: soundEffects has no connected first-cut behavior yet.
-// autoCaptions and backgroundMusic are persisted as typed ProjectIntent
-// policies and deterministically checked against the Director decision.
-export const UNWIRED_SETTINGS = ["soundEffects"] as const;
-
-/* --- credits -------------------------------------------------------------- */
-
-// TODO 硬编码: there is no billing system. Every credit number on this page is
-// display-only and must not be presented as real until one exists.
-export const CREDITS = {
-  used: 2450,
-  total: 5000,
-  estimatedCost: 20,
-} as const;
-
 /* --- layout --------------------------------------------------------------- */
 
 /**
@@ -160,23 +139,6 @@ export const CREDITS = {
  * stay fixed. A 1px border is 1px on every screen.
  */
 export const LAYOUT = {
-  // TODO 硬编码: sidebar floor/ceiling. The floor is where the nav labels
-  // start to crowd; the ceiling is where more width is just wasted.
-  sidebarWidth: "clamp(13rem, 15vw, 16.5rem)",
-  // TODO 硬编码: the settings panel needs enough width for its longest option
-  // label ("16:9 (Widescreen)") without wrapping.
-  settingsWidth: "clamp(17.5rem, 21vw, 21.5rem)",
   // TODO 硬编码: header height.
-  topBarHeight: "clamp(3.5rem, 4.5vw, 4.25rem)",
-  // TODO 硬编码: a ceiling on the content column. Past this, line lengths in
-  // the cards get uncomfortably long rather than better.
-  contentMaxWidth: "112rem",
+  topBarHeight: "2.75rem",
 } as const;
-
-/**
- * Below this width the settings panel stops sitting beside the upload cards
- * and moves under them. Chosen so three upload cards plus the panel still fit
- * without any of them being squeezed.
- */
-// TODO 硬编码: the breakpoint where the two-column layout collapses.
-export const STACK_BREAKPOINT_PX = 1180;

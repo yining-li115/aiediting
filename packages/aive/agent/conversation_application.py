@@ -2,24 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Protocol
 
 from ..contracts.conversation import (
+    AgentToolCall,
     AgentToolStep,
     AgentTurn,
+    AgentTurnContext,
     AgentTurnTicket,
     Conversation,
     ConversationTicket,
     CreateAgentTurnRequest,
     CreateConversationRequest,
+    CreateComponentCandidateCall,
+    InspectMediaCall,
     PatchProposal,
+    ProposePatchCall,
+    ReadProjectCall,
+    SearchComponentsCall,
+    SearchMomentsCall,
 )
 from ..contracts.patch import Patch
 from ..contracts.rendering import CreateRenderRequest
 from ..jobs import Stage
 from ..media.analysis_repository import MediaAnalysisRepository
+from ..media.audio_asset_analysis import AudioAssetAnalysisApplication
 from ..media.repository import MediaAssetRepository
 from ..project.application import ProjectRevisionApplication
 from ..project.hashing import canonical_model_hash
@@ -27,14 +39,74 @@ from ..rendering.application import RevisionRenderApplication
 from ..rendering.application import RenderApplicationError
 from ..rendering.ffmpeg import ProjectRenderUnsupported
 from ..rendering.repository import RenderArtifactNotFound
-from ..specs.base import new_id
+from ..ids import new_id
 from .conversation_repository import ConversationRepository
 from .harness import VideoAgentHarness
+from .preview_evidence import (
+    PreviewAnnotationEvidenceExtractor,
+    PreviewAnnotationImage,
+)
 from .tools import AgentToolPermissionError
 
 
 class ContinuousEditUnavailable(RuntimeError):
     pass
+
+
+def _tool_started_event(call: AgentToolCall) -> dict[str, object]:
+    data: dict[str, object] = {"tool": call.tool}
+    if isinstance(call, SearchMomentsCall):
+        data.update(
+            query=call.query.text,
+            limit=call.query.limit,
+        )
+    elif isinstance(call, InspectMediaCall):
+        data["target_count"] = len(call.moment_ids)
+    elif isinstance(call, SearchComponentsCall):
+        data.update(
+            query=call.query.text,
+            usage=call.query.usage,
+            limit=call.query.limit,
+        )
+    elif isinstance(call, CreateComponentCandidateCall):
+        data.update(
+            component_name=call.request.manifest.name,
+            usage=call.request.manifest.usage,
+        )
+    elif isinstance(call, ProposePatchCall):
+        data.update(
+            summary=call.proposal.summary,
+            operation_count=len(call.proposal.operations),
+            operation_types=[operation.op for operation in call.proposal.operations],
+        )
+    return data
+
+
+def _tool_completed_event(step: AgentToolStep) -> dict[str, object]:
+    result = step.result
+    data = _tool_started_event(step.call)
+    data["failed"] = result.error is not None
+    if result.error is not None:
+        data["error"] = result.error
+    elif isinstance(step.call, ReadProjectCall):
+        assert result.document is not None
+        data.update(
+            track_count=len(result.document.timeline.tracks),
+            duration_frames=result.document.timeline.duration_frames,
+        )
+    elif isinstance(step.call, SearchMomentsCall):
+        data["result_count"] = len(result.hits or ())
+    elif isinstance(step.call, InspectMediaCall):
+        data["result_count"] = len(result.moments or ())
+    elif isinstance(step.call, SearchComponentsCall):
+        data["result_count"] = len(result.components or ())
+    elif isinstance(step.call, CreateComponentCandidateCall):
+        assert result.component_candidate is not None
+        data["candidate_status"] = result.component_candidate.status
+    elif isinstance(step.call, ProposePatchCall):
+        assert result.proposal is not None
+        data["operation_count"] = len(result.proposal.operations)
+    return data
 
 
 class AgentTurnProgressReporter(Protocol):
@@ -58,6 +130,8 @@ class ConversationApplication:
         rendering: RevisionRenderApplication,
         harness: VideoAgentHarness,
         assets: MediaAssetRepository | None = None,
+        audio_assets: AudioAssetAnalysisApplication | None = None,
+        annotation_evidence: PreviewAnnotationEvidenceExtractor | None = None,
         id_factory: Callable[[str], str] = new_id,
     ) -> None:
         self._repository = repository
@@ -66,6 +140,8 @@ class ConversationApplication:
         self._rendering = rendering
         self._harness = harness
         self._assets = assets
+        self._audio_assets = audio_assets
+        self._annotation_evidence = annotation_evidence
         self._id_factory = id_factory
 
     def create_conversation(
@@ -174,17 +250,39 @@ class ConversationApplication:
                     instruction=turn.instruction,
                     workspace=turn.workspace,
                 )
+                asset_statuses = (
+                    self._assets.list_processing_status(turn.project_id)
+                    if self._assets is not None
+                    else ()
+                )
+                audio_analyses = (
+                    await self._audio_assets.resolve(
+                        current.document,
+                        asset_statuses,
+                    )
+                    if self._audio_assets is not None
+                    else ()
+                )
+                if audio_analyses and self._assets is not None:
+                    asset_statuses = self._assets.list_processing_status(
+                        turn.project_id
+                    )
+                    handle.emit(
+                        "audio_assets_analyzed",
+                        turn_id=turn.turn_id,
+                        asset_count=len(audio_analyses),
+                        beat_grounded_asset_count=sum(
+                            bool(analysis.signal.beat_times_ms)
+                            for analysis in audio_analyses
+                        ),
+                    )
                 context = self._harness.build_turn_context(
                     turn_id=turn.turn_id,
                     request=request,
                     revision=current,
                     moments=self._analysis.list_moments(turn.project_id),
                     history=self._repository.history_before_turn(handle.job_id),
-                    asset_statuses=(
-                        self._assets.list_processing_status(turn.project_id)
-                        if self._assets is not None
-                        else ()
-                    ),
+                    asset_statuses=asset_statuses,
                 )
                 turn = self._repository.save_context(handle.job_id, context)
             handle.update(stage=Stage.PLANNING, progress=0.1)
@@ -195,6 +293,21 @@ class ConversationApplication:
                 moment_count=len(context.moments),
                 selected_target_ids=list(context.workspace.selected_target_ids),
             )
+
+            def report_model_start(step_index: int) -> None:
+                handle.emit(
+                    "agent_model_started",
+                    turn_id=turn.turn_id,
+                    step_index=step_index,
+                )
+
+            def report_tool_start(step_index: int, call: AgentToolCall) -> None:
+                handle.emit(
+                    "agent_tool_started",
+                    turn_id=turn.turn_id,
+                    step_index=step_index,
+                    **_tool_started_event(call),
+                )
 
             def persist_step(step: AgentToolStep) -> None:
                 self._repository.append_step(handle.job_id, step)
@@ -208,7 +321,7 @@ class ConversationApplication:
                     "agent_tool_completed",
                     turn_id=turn.turn_id,
                     step_index=step.step_index,
-                    tool=step.call.tool,
+                    **_tool_completed_event(step),
                 )
 
             def validate_proposal(proposal: PatchProposal) -> None:
@@ -228,12 +341,31 @@ class ConversationApplication:
                         str(exc) or exc.__class__.__name__
                     ) from exc
 
-            outcome = await self._harness.run_edit_turn(
-                context,
-                existing_steps=turn.steps,
-                on_step=persist_step,
-                proposal_validator=validate_proposal,
-            )
+            with TemporaryDirectory(prefix="aive-preview-annotation-") as directory:
+                annotation_images = await self._build_preview_annotation_images(
+                    context,
+                    Path(directory),
+                )
+                if annotation_images:
+                    handle.emit(
+                        "preview_annotation_evidence_ready",
+                        turn_id=turn.turn_id,
+                        annotation_ids=[
+                            image.annotation_id for image in annotation_images
+                        ],
+                        evidence_frames=[
+                            image.evidence_frame for image in annotation_images
+                        ],
+                    )
+                outcome = await self._harness.run_edit_turn(
+                    context,
+                    existing_steps=turn.steps,
+                    on_model_start=report_model_start,
+                    on_tool_start=report_tool_start,
+                    on_step=persist_step,
+                    proposal_validator=validate_proposal,
+                    annotation_images=annotation_images,
+                )
             if outcome.proposal is None:
                 completed = self._repository.complete(
                     handle.job_id,
@@ -249,6 +381,15 @@ class ConversationApplication:
 
             handle.update(stage=Stage.MATCHING, progress=0.7)
             patch = _build_patch(turn, outcome.proposal)
+            handle.emit(
+                "agent_patch_applying",
+                turn_id=turn.turn_id,
+                summary=outcome.proposal.summary,
+                operation_count=len(outcome.proposal.operations),
+                operation_types=[
+                    operation.op for operation in outcome.proposal.operations
+                ],
+            )
             write = self._projects.apply_patch(
                 patch,
                 candidate_validator=lambda revision: self._rendering.validate_candidate(
@@ -282,7 +423,6 @@ class ConversationApplication:
             response = _explain_applied_patch(
                 outcome.proposal,
                 patch,
-                revision_id,
             )
             if render_error is not None:
                 response = (
@@ -303,7 +443,9 @@ class ConversationApplication:
                 "agent_turn_committed",
                 turn_id=turn.turn_id,
                 revision_id=revision_id,
+                summary=outcome.proposal.summary,
                 operation_count=len(patch.operations),
+                operation_types=[operation.op for operation in patch.operations],
                 render_job_id=render_job_id,
             )
             return completed.model_dump(mode="json")
@@ -320,6 +462,48 @@ class ConversationApplication:
 
     def get_job_turn(self, job_id: str) -> AgentTurn:
         return self._repository.get_job_turn(job_id)
+
+    async def _build_preview_annotation_images(
+        self,
+        context: AgentTurnContext,
+        directory: Path,
+    ) -> tuple[PreviewAnnotationImage, ...]:
+        annotations = tuple(
+            annotation
+            for annotation in context.workspace.preview_annotations
+            if annotation.spatial_region is not None
+        )
+        if not annotations:
+            return ()
+        if self._annotation_evidence is None:
+            raise ContinuousEditUnavailable(
+                "spatial preview annotation evidence is not configured"
+            )
+
+        images: list[PreviewAnnotationImage] = []
+        for index, annotation in enumerate(annotations):
+            artifact = self._rendering.get(
+                context.project_id,
+                annotation.artifact_id,
+            )
+            delivery = self._rendering.delivery(
+                context.project_id,
+                annotation.artifact_id,
+            )
+            artifact_start_frame = (
+                artifact.output_range.start_frame if artifact.output_range else 0
+            )
+            image = await asyncio.to_thread(
+                self._annotation_evidence.extract,
+                annotation,
+                media_path=delivery.path,
+                artifact_start_frame=artifact_start_frame,
+                output_path=(
+                    directory / f"{index:02d}-{annotation.annotation_id}.jpg"
+                ),
+            )
+            images.append(image)
+        return tuple(images)
 
 
 def _build_patch(turn: AgentTurn, proposal: PatchProposal) -> Patch:
@@ -339,7 +523,6 @@ def _build_patch(turn: AgentTurn, proposal: PatchProposal) -> Patch:
 def _explain_applied_patch(
     proposal: PatchProposal,
     patch: Patch,
-    revision_id: str,
 ) -> str:
     counts: dict[str, int] = {}
     for operation in patch.operations:
@@ -348,6 +531,7 @@ def _explain_applied_patch(
         "add_track": "新增字幕、音频或图形轨道",
         "set_creative_plan": "更新创作计划",
         "set_timeline_duration": "调整成片时长",
+        "set_output_settings": "调整输出画布",
         "set_dependencies": "固定渲染组件版本",
         "delete_visual_clip": "删除镜头",
         "replace_visual_source": "替换画面来源",
@@ -376,10 +560,8 @@ def _explain_applied_patch(
     changes = "、".join(
         f"{labels[name]} {count} 处" for name, count in counts.items()
     )
-    return (
-        f"已完成：{changes}。修改通过 ProjectService 校验，并保存为新版本 "
-        f"{revision_id}。{proposal.rationale}"
-    )[:8_000]
+    summary = proposal.summary.strip().rstrip("。.!！")
+    return f"{summary}。这次完成了{changes}。"[:8_000]
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

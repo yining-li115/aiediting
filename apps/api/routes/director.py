@@ -17,8 +17,12 @@ from aive.db.director_repository import SqlAlchemyDirectorRunRepository
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.db.style_reference_repository import (
+    SqlAlchemyStyleReferenceBlueprintRepository,
+)
 from aive.db.session import get_session_factory
 from aive.jobs import JobRunner
+from aive.media.audio_asset_analysis import AudioAssetAnalysisApplication
 from aive.providers import get_provider
 from aive.rendering import RevisionRenderApplication
 from aive.roles import Role
@@ -33,11 +37,14 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["project Director"])
 
 
 def get_video_agent_harness() -> VideoAgentHarness:
+    reviewer = get_provider(Role.REVIEWER)
     return VideoAgentHarness(
         provider=get_provider(Role.DIRECTOR),
+        moment_search_provider=get_provider(Role.RERANK),
+        creative_reviewer=reviewer,
         component_tools=get_component_application(),
         render_review_engine=RenderReviewEngine(
-            provider=get_provider(Role.REVIEWER),
+            provider=reviewer,
         ),
     )
 
@@ -53,6 +60,14 @@ def get_director_application(
         assets=SqlAlchemyMediaAssetRepository(sessions),
         rendering=get_revision_render_application(),
         harness=harness,
+        style_references=SqlAlchemyStyleReferenceBlueprintRepository(sessions),
+        style_understanding=get_provider(Role.STYLE),
+        storage=get_storage(),
+        audio_assets=AudioAssetAnalysisApplication(
+            storage=get_storage(),
+            assets=SqlAlchemyMediaAssetRepository(sessions),
+            provider=get_provider(Role.AUDIO),
+        ),
     )
 
 

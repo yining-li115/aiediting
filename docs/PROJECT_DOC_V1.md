@@ -72,7 +72,9 @@ A revision cannot be its own parent.
 `intent` records the current project goal:
 
 - `task_mode`: `autonomous` or `reference_remake`;
-- target duration in output frames;
+- target duration in output frames; it must be positive, but the product
+  contract deliberately has no maximum duration—the UI must not turn a model,
+  analysis-window, or preview-range limit into a project-length limit;
 - original/current prompt;
 - explicit user requirements;
 - style tags used as creative context;
@@ -277,14 +279,10 @@ The following data is not authoritative edit state and must remain outside:
 These objects reference `project_id` and `revision_id`; they never overwrite
 the document.
 
-## 12. Current migration boundary
+## 12. Migration boundary
 
-The existing `aive.specs.EditPlanSpec` and `TimelineSpec` remain operational
-only for the old pipeline while Stage 1 is implemented. They are not aliases
-for ProjectDoc and new product behavior must not extend them.
-
-Their removal condition is now met for the new investor-demo path:
-ProjectService persistence, Patch application, semantic analysis, autonomous
-first-cut authoring, FFmpeg rendering, and browser preview all consume
-ProjectDoc. The legacy types remain only for still-unmigrated legacy CLI and
-reference modules; new behavior must not extend them.
+The legacy `EditPlanSpec` / `TimelineSpec` runtime, CLI, and HTTP validation
+API have been removed. ProjectService persistence, Patch application,
+model-authored understanding and Edit Blueprints, rendering, and browser
+preview all consume ProjectDoc. Historical database tables remain migration
+records only and are not runtime edit state.

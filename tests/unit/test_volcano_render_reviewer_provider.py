@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from aive.agent.provider import (
+    OpenAICompatibleRenderReviewerProvider,
     RenderReviewerProviderError,
     VolcanoRenderReviewerProvider,
 )
@@ -34,18 +35,15 @@ def _context() -> RenderReviewContext:
             fps=Rational(num=30, den=1),
         ),
         expected_duration_seconds=2,
-        expects_audio=False,
+        expects_audio=True,
         inspection=RenderInspection(
             duration_seconds=2,
             width=1080,
             height=1920,
             fps=30,
             has_video=True,
-            has_audio=False,
+            has_audio=True,
             sampled_frame_count=5,
-            black_frame_ratio=0,
-            flat_frame_ratio=0,
-            mean_sharpness=0.8,
         ),
     )
 
@@ -87,6 +85,7 @@ async def test_volcano_render_reviewer_returns_typed_review(
         adapter="openai_compatible",
         roles=(Role.REVIEWER,),
         accepts_video=True,
+        reads_video_audio=True,
         structured_output=True,
         base_url_env="AIVE_TEST_ARK_URL",
         api_key_env="AIVE_TEST_ARK_KEY",
@@ -101,6 +100,7 @@ async def test_volcano_render_reviewer_returns_typed_review(
     review = await provider.review(_context(), video, ())
 
     assert review.visual_review_performed is True
+    assert review.audio_review_performed is True
     assert review.summary == "The preview matches the brief."
     assert requests[0]["model"] == "ep-test-reviewer"
     assert "video_url" in json.dumps(requests[0])
@@ -122,3 +122,61 @@ def test_volcano_render_reviewer_rejects_data_sharing_endpoint() -> None:
 
     with pytest.raises(RenderReviewerProviderError, match="shares submitted data"):
         VolcanoRenderReviewerProvider(card=card)
+
+
+async def test_gemini_compatible_reviewer_uses_revision_frame_samples(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_URL", "https://google.example/v1beta/openai")
+    monkeypatch.setenv("AIVE_TEST_GOOGLE_KEY", "test-key")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "visual_review_performed": True,
+                                    "issues": [],
+                                    "summary": "The sampled preview frames are coherent.",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    card = ModelCard(
+        key="test-gemini-reviewer",
+        vendor="google",
+        model_id="gemini-test",
+        adapter="openai_compatible",
+        roles=(Role.REVIEWER,),
+        accepts_video=True,
+        accepts_images=True,
+        structured_output=True,
+        base_url_env="AIVE_TEST_GOOGLE_URL",
+        api_key_env="AIVE_TEST_GOOGLE_KEY",
+    )
+    provider = OpenAICompatibleRenderReviewerProvider(
+        card=card,
+        transport=httpx.MockTransport(handler),
+    )
+    video = tmp_path / "preview.mp4"
+    video.write_bytes(b"video")
+    sample = tmp_path / "sample.jpg"
+    sample.write_bytes(b"image")
+
+    review = await provider.review(_context(), video, (sample,))
+
+    payload = json.dumps(requests[0])
+    assert "image_url" in payload
+    assert "video_url" not in payload
+    assert review.audio_review_performed is False

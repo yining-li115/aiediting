@@ -74,9 +74,6 @@ def _review_context() -> RenderReviewContext:
             has_video=True,
             has_audio=False,
             sampled_frame_count=5,
-            black_frame_ratio=0,
-            flat_frame_ratio=0,
-            mean_sharpness=0.8,
         ),
     )
 

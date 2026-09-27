@@ -13,9 +13,9 @@ import subprocess
 from pathlib import Path
 
 from ..config import settings
-from ..specs.base import new_id
-from ..specs.enums import PHOTO_NOMINAL_DURATION, PHOTO_SUFFIXES
-from ..specs.segment import Asset
+from ..ids import new_id
+from ..media.formats import PHOTO_NOMINAL_DURATION, PHOTO_SUFFIXES
+from .types import ProbedAsset
 
 PROXY_HEIGHT = 540
 PROXY_FPS = 30
@@ -72,12 +72,12 @@ def probe_photo(
     project_id: str,
     asset_id: str | None = None,
     storage_key: str = "",
-) -> Asset:
+) -> ProbedAsset:
     """A still image, described in the same shape as a video.
 
-    Duration is nominal: a photo has none, and the matcher is free to give it
-    whatever a slot asks for. Reporting it as zero would make it look like a
-    broken file to every length check downstream.
+    Duration is nominal: a photo has none, and the model-authored edit may hold
+    it for any validated duration. Reporting it as zero would make it look like
+    a broken file to every downstream integrity check.
     """
     info = ffprobe(path)
     streams = info.get("streams", [])
@@ -85,7 +85,7 @@ def probe_photo(
     if image is None:
         raise ProbeError(f"{path} could not be read as an image")
 
-    return Asset(
+    return ProbedAsset(
         asset_id=asset_id or new_id("asset"),
         project_id=project_id,
         storage_key=storage_key,
@@ -104,7 +104,7 @@ def probe_asset(
     project_id: str,
     asset_id: str | None = None,
     storage_key: str = "",
-) -> Asset:
+) -> ProbedAsset:
     if is_photo(path):
         return probe_photo(path, project_id, asset_id, storage_key)
 
@@ -124,10 +124,11 @@ def probe_asset(
     if duration <= 0:
         raise ProbeError(f"{path} reports a non-positive duration")
 
-    return Asset(
+    return ProbedAsset(
         asset_id=asset_id or new_id("asset"),
         project_id=project_id,
         storage_key=storage_key,
+        kind="video",
         original_name=path.name,
         duration=duration,
         width=width,
@@ -138,7 +139,7 @@ def probe_asset(
 
 
 def make_photo_proxy(
-    asset: Asset, source: Path, out_path: Path, force: bool = False
+    asset: ProbedAsset, source: Path, out_path: Path, force: bool = False
 ) -> Path:
     """A resized still, so everything downstream reads one consistent size."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +160,7 @@ def make_photo_proxy(
 
 
 def make_proxy(
-    asset: Asset, source: Path, out_path: Path, force: bool = False
+    asset: ProbedAsset, source: Path, out_path: Path, force: bool = False
 ) -> Path:
     """Transcode to a normalised analysis copy: 540p, 30fps, no audio.
 
@@ -190,7 +191,7 @@ def make_proxy(
 
 
 def make_thumbnail(
-    asset: Asset, source: Path, out_path: Path, force: bool = False
+    asset: ProbedAsset, source: Path, out_path: Path, force: bool = False
 ) -> Path:
     """Create one compact JPEG poster without changing authoritative media."""
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -177,6 +177,75 @@ def test_clean_caption_layer_is_renderable() -> None:
     ProjectDocFFmpegRenderer().validate(document)
 
 
+def test_portrait_output_settings_render_to_a_portrait_file(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            settings.ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x180:r=30:d=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+    )
+    portrait_clip = VideoClip(
+        clip_id="portrait_clip",
+        asset_id="asset_a",
+        source=SourceRange(start=0, end=2_000, timescale=1_000),
+        output=FrameRange(start_frame=0, duration_frames=60),
+    )
+    document = _doc(clips=(portrait_clip,))
+    document = document.model_copy(
+        update={
+            "timeline": document.timeline.model_copy(
+                update={
+                    "duration_frames": 60,
+                    "output": document.timeline.output.model_copy(
+                        update={"width": 180, "height": 320}
+                    ),
+                }
+            )
+        }
+    )
+    output = tmp_path / "portrait-preview.mp4"
+
+    ProjectDocFFmpegRenderer().render(
+        document,
+        "proxy",
+        output,
+        {"asset_a": source},
+    )
+    probe = subprocess.run(
+        [
+            settings.ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert probe.stdout.strip() == "90,160"
+
+
 def test_speech_ducking_requires_a_music_clip_and_speech_bus() -> None:
     document = _doc()
     document = document.model_copy(

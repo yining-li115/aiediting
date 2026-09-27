@@ -1,95 +1,58 @@
 "use client";
 
-import { Bell, ChevronDown, History, LayoutTemplate } from "lucide-react";
+import { Compass, Play, Plus, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
 
-import { LAYOUT } from "@/lib/config";
-
-// TODO 硬编码: the Chat tab has no page behind it. It is where the
-// conversational editing agent will live (TECHNICAL_PLAN section 11); until
-// that exists, switching to it would show an empty screen.
-const TABS = ["Chat", "Workspace"] as const;
-
-// TODO 硬编码: signed-in user. No authentication exists yet.
-const USER = { name: "Lena", initial: "L" };
+import { APP_NAME, LAYOUT } from "@/lib/config";
 
 export function TopBar() {
-  const [active, setActive] = useState<(typeof TABS)[number]>("Workspace");
   const pathname = usePathname();
   const projectMatch = pathname.match(/^\/projects\/([^/]+)/);
-  const historyHref = projectMatch
-    ? `/projects/${projectMatch[1]}#history`
-    : null;
 
   return (
     <header
-      className="flex shrink-0 items-center justify-between gap-4 border-b border-line bg-surface px-4 sm:px-7"
+      className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-white px-3"
       style={{ height: LAYOUT.topBarHeight }}
     >
-      <nav className="flex h-full items-center gap-7">
-        {TABS.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            onClick={() => setActive(tab)}
-            className={`relative flex h-full items-center text-[14px] transition-colors ${
-              active === tab
-                ? "font-semibold text-ink"
-                : "text-ink-soft hover:text-ink"
-            }`}
-          >
-            {tab}
-            {active === tab && (
-              <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-ink" />
-            )}
-          </button>
-        ))}
-      </nav>
-
-      <div className="flex items-center gap-4 xl:gap-5">
-        {/* Labels drop before the whole control does: the icon still works. */}
-        <button
-          type="button"
-          className="flex items-center gap-2 text-[13.5px] text-ink-soft transition-colors hover:text-ink"
-        >
-          <LayoutTemplate size={16} />
-          <span className="hidden md:inline">Templates</span>
-        </button>
-        {historyHref ? (
-          <Link
-            href={historyHref}
-            className="flex items-center gap-2 text-[13.5px] text-ink-soft transition-colors hover:text-ink"
-          >
-            <History size={16} />
-            <span className="hidden md:inline">History</span>
-          </Link>
-        ) : (
-          <span
-            aria-disabled="true"
-            title="Open a project to view its history"
-            className="flex cursor-not-allowed items-center gap-2 text-[13.5px] text-ink-faint"
-          >
-            <History size={16} />
-            <span className="hidden md:inline">History</span>
+      <div className="flex min-w-0 items-center gap-3">
+        <Link href="/" className="flex items-center gap-2 text-xs font-semibold">
+          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ink text-white">
+            <Sparkles size={12} />
+          </span>
+          <span className="hidden sm:inline">{APP_NAME}</span>
+        </Link>
+        <span className="h-4 w-px bg-line-strong" />
+        <span className="max-w-52 truncate text-[11px] text-ink-faint">
+          {projectMatch ? `Project ${projectMatch[1].slice(0, 12)}` : "Video Agent"}
+        </span>
+        {projectMatch && (
+          <span className="hidden items-center gap-1.5 rounded-md bg-accent-soft px-2.5 py-1.5 text-[11px] font-medium text-ink-soft sm:flex">
+            <Play size={11} fill="currentColor" /> Preview
           </span>
         )}
-        <button
-          type="button"
-          className="text-ink-soft transition-colors hover:text-ink"
-          aria-label="Notifications"
-        >
-          <Bell size={17} />
-        </button>
-        <button type="button" className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent">
-            {USER.initial}
-          </span>
-          <span className="hidden text-[13.5px] sm:inline">{USER.name}</span>
-          <ChevronDown size={14} className="text-ink-faint" />
-        </button>
       </div>
+
+      <nav className="flex items-center gap-1.5">
+        {!projectMatch && (
+          <a
+            href="#remotion-templates"
+            className="flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs text-ink-soft transition-colors hover:bg-accent-soft hover:text-ink"
+          >
+            <Compass size={14} />
+            <span className="hidden sm:inline">Explore</span>
+          </a>
+        )}
+        <a
+          href={projectMatch ? "/" : "#composer"}
+          className="flex h-8 items-center gap-1.5 rounded-md bg-ink px-3 text-xs font-medium text-white transition-colors hover:bg-accent-hover"
+        >
+          <Plus size={14} />
+          <span className="hidden sm:inline">
+            {projectMatch ? "New project" : "Start creating"}
+          </span>
+        </a>
+      </nav>
     </header>
   );
 }

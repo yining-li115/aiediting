@@ -1,18 +1,19 @@
 "use client";
 
-import { Film, Layers, Music2, Video } from "lucide-react";
+import { Captions, Clapperboard, Film, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
 
-import { PromptCard } from "@/components/workspace/PromptCard";
 import {
-  UploadCard,
+  ProjectComposer,
+  type ProjectSettings,
+  type UploadKind,
   type UploadedFile,
-} from "@/components/workspace/UploadCard";
+} from "@/components/workspace/ProjectComposer";
 import {
-  VideoSettings,
-  type Settings,
-} from "@/components/workspace/VideoSettings";
+  RemotionTemplateGallery,
+  type RemotionPromptTemplate,
+} from "@/components/workspace/RemotionTemplateGallery";
 import { ApiError, createProject, uploadAssets } from "@/lib/api/client";
 import type {
   CreateProjectRequest,
@@ -20,23 +21,19 @@ import type {
 } from "@/lib/api/types";
 import {
   DEFAULT_SETTINGS,
-  LAYOUT,
   OUTPUT_DIMENSIONS,
-  UPLOAD_LIMITS,
+  PROMPT_MAX_CHARS,
 } from "@/lib/config";
 
 /**
  * The workspace: everything the user gives us before a cut exists.
  *
- * The three upload slots are not variations on one another - they map to
- * three different pipelines in the backend:
+ * The active upload slots are not variations on one another - they map to
+ * different pipelines in the backend:
  *
  *   User Materials   the footage to cut from
- *   Style References several videos, aggregated into a style prior (mode B1)
- *   Remake Video     exactly one video, used as a shot-by-shot template (B2)
- *
- * That is why the third takes a single file: five videos have no shot-level
- * correspondence with each other, so they cannot form a template.
+ *   Style References videos whose immutable Blueprints condition the Director
+ * Remake Reference is intentionally visible-but-disabled as a later extension.
  *
  * There is deliberately no preview here. Generating starts a job that runs for
  * minutes, and what follows is a different surface - live progress, then an
@@ -55,17 +52,42 @@ function toUploaded(file: File): UploadedFile {
     thumbnail: file.type.startsWith("image/")
       ? URL.createObjectURL(file)
       : undefined,
-    // Duration and resolution come from the backend's probe step.
-    durationLabel: undefined,
-    resolutionLabel: undefined,
   };
 }
+
+const QUICK_PROMPTS = [
+  {
+    title: "Travel story",
+    prompt:
+      "Create a cinematic travel story with a strong opening, clear visual progression, restrained captions, and music that builds toward the ending.",
+    icon: Film,
+  },
+  {
+    title: "Vertical highlights",
+    prompt:
+      "Create a fast-paced vertical highlight reel. Open with the strongest moment, remove pauses, keep the rhythm energetic, and add concise readable captions.",
+    icon: Sparkles,
+  },
+  {
+    title: "Interview cut",
+    prompt:
+      "Find the most compelling statements in this interview and shape them into a concise narrative with natural pacing, clean cuts, and accurate captions.",
+    icon: Captions,
+  },
+  {
+    title: "Visual essay",
+    prompt:
+      "Create a calm premium visual essay with longer confident shots, minimal typography, subtle music, and transitions that never distract from the material.",
+    icon: Clapperboard,
+  },
+] as const;
 
 export default function WorkspacePage() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
-  const [autoEnhance, setAutoEnhance] = useState(true);
-  const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SETTINGS });
+  const [settings, setSettings] = useState<ProjectSettings>({
+    ...DEFAULT_SETTINGS,
+  });
 
   const [materials, setMaterials] = useState<UploadedFile[]>([]);
   const [styles, setStyles] = useState<UploadedFile[]>([]);
@@ -81,20 +103,38 @@ export default function WorkspacePage() {
     uploadRequest?: UploadAssetsRequest;
   } | null>(null);
 
-  const add =
-    (
-      setter: React.Dispatch<React.SetStateAction<UploadedFile[]>>,
-      single = false,
-    ) =>
-    (files: File[]) =>
-      setter((current) =>
-        single ? [toUploaded(files[0])] : [...current, ...files.map(toUploaded)],
-      );
+  const setterFor = (kind: UploadKind) => {
+    if (kind === "materials") return setMaterials;
+    if (kind === "styles") return setStyles;
+    if (kind === "remake") return setRemake;
+    return setMusic;
+  };
 
-  const remove =
-    (setter: React.Dispatch<React.SetStateAction<UploadedFile[]>>) =>
-    (id: string) =>
-      setter((current) => current.filter((file) => file.id !== id));
+  const add = (kind: UploadKind, files: File[]) => {
+    const setter = setterFor(kind);
+    const single = kind === "remake" || kind === "music";
+    setter((current) =>
+      single ? [toUploaded(files[0])] : [...current, ...files.map(toUploaded)],
+    );
+  };
+
+  const remove = (kind: UploadKind, id: string) =>
+    setterFor(kind)((current) => current.filter((file) => file.id !== id));
+
+  const useTemplate = (template: RemotionPromptTemplate) => {
+    setPrompt((current) => {
+      const existing = current.trim();
+      const next = existing
+        ? `${existing}\n\nVisual treatment: ${template.prompt}`
+        : template.prompt;
+      return next.slice(0, PROMPT_MAX_CHARS);
+    });
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById("composer")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  };
 
   const onGenerate = useCallback(async () => {
     const dimensions =
@@ -105,7 +145,7 @@ export default function WorkspacePage() {
       prompt,
       settings,
       dimensions,
-      taskMode: remake.length ? "reference_remake" : "autonomous",
+      taskMode: "autonomous",
     });
     const existing = pendingCreate.current;
     const createRequest: CreateProjectRequest =
@@ -118,7 +158,7 @@ export default function WorkspacePage() {
             origin: "user",
             summary: "Project created from the Web workspace",
             intent: {
-              task_mode: remake.length ? "reference_remake" : "autonomous",
+              task_mode: "autonomous",
               target_duration_frames: settings.length * 30,
               prompt: prompt.trim() || null,
               caption_policy: settings.autoCaptions ? "auto" : "none",
@@ -159,13 +199,6 @@ export default function WorkspacePage() {
           roles: ["reference", "style_reference"] as [
             "reference",
             "style_reference",
-          ],
-        })),
-        ...remake.map((uploaded) => ({
-          uploaded,
-          roles: ["reference", "remake_reference"] as [
-            "reference",
-            "remake_reference",
           ],
         })),
         ...music.map((uploaded) => ({
@@ -239,117 +272,57 @@ export default function WorkspacePage() {
       setCreating(false);
       setUploadProgress(null);
     }
-  }, [materials, music, prompt, remake, router, settings, styles]);
+  }, [materials, music, prompt, router, settings, styles]);
 
   return (
-    <div
-      className="mx-auto flex w-full flex-col gap-5 px-4 py-5 sm:px-6 lg:px-7"
-      style={{ maxWidth: LAYOUT.contentMaxWidth }}
-    >
-      <PromptCard
-        value={prompt}
-        onChange={setPrompt}
-        autoEnhance={autoEnhance}
-        onAutoEnhanceChange={setAutoEnhance}
-      />
+    <div className="mx-auto w-full max-w-6xl px-4 pb-20 pt-12 sm:px-6 sm:pt-20">
+      <div className="mx-auto max-w-3xl text-center">
+        <h1 className="text-4xl font-semibold tracking-[-0.045em] text-ink sm:text-5xl">
+          What will we make?
+        </h1>
+        <p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-ink-soft">
+          Give the Agent your footage and a direction. It will build the first cut, explain its work, and keep every version safe.
+        </p>
+      </div>
+
+      <div className="mt-9">
+        <ProjectComposer
+          prompt={prompt}
+          onPromptChange={setPrompt}
+          settings={settings}
+          onSettingsChange={setSettings}
+          uploads={{ materials, styles, remake, music }}
+          onAdd={add}
+          onRemove={remove}
+          onCreate={onGenerate}
+          creating={creating}
+          progress={uploadProgress}
+        />
+        <div className="mx-auto mt-3 flex max-w-3xl flex-wrap justify-center gap-1.5">
+          {QUICK_PROMPTS.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.title}
+                type="button"
+                onClick={() => setPrompt(item.prompt)}
+                className="flex items-center gap-1.5 rounded-full border border-line bg-white px-3 py-1.5 text-[11px] text-ink-soft transition hover:border-line-strong hover:text-ink"
+              >
+                <Icon size={12} />
+                {item.title}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {error && (
-        <p className="rounded-[var(--radius-control)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <p className="mx-auto mt-4 max-w-3xl rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </p>
       )}
 
-      {/* Side by side on a wide screen, stacked below it. The settings panel
-          gets a floor and a ceiling rather than a fixed width, so it stays
-          proportional instead of being right at exactly one monitor size. */}
-      <div
-        className="flex flex-col gap-5 xl:flex-row xl:items-start"
-        style={
-          { "--settings-width": LAYOUT.settingsWidth } as React.CSSProperties
-        }
-      >
-        {/* min-w-0 matters: without it a long filename inside a card sets the
-            flex item's minimum width and the whole row stops shrinking. */}
-        <div className="min-w-0 flex-1">
-          {/* One card per row on a phone, two on a tablet, three only once
-              there is room for three comfortable ones rather than three
-              narrow ones. */}
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 2xl:grid-cols-4">
-            <UploadCard
-              icon={<Video size={13} className="text-[#3b82f6]" />}
-              iconClass="bg-[#e7f0fe]"
-              title="User Materials"
-              description="Upload your video clips and images. Multiple files supported."
-              dropzoneTitle="Upload files"
-              {...UPLOAD_LIMITS.material}
-              multiple
-              files={materials}
-              onAdd={add(setMaterials)}
-              onRemove={remove(setMaterials)}
-              countLabel={(count) => `${count} files uploaded`}
-            />
-
-            <UploadCard
-              icon={<Layers size={13} className="text-[#8b5cf6]" />}
-              iconClass="bg-[#f0ebfe]"
-              title="Style References"
-              description="Upload reference videos to match the look, feel, color, and motion."
-              dropzoneTitle="Add style reference videos"
-              {...UPLOAD_LIMITS.style}
-              multiple
-              files={styles}
-              onAdd={add(setStyles)}
-              onRemove={remove(setStyles)}
-              countLabel={(count) => `${count} style references`}
-            />
-
-            <UploadCard
-              icon={<Film size={13} className="text-[#f97316]" />}
-              iconClass="bg-[#feeee2]"
-              title="Remake Video"
-              optional
-              description="Upload one video to replicate its editing structure and pacing."
-              dropzoneTitle="Add remake reference"
-              {...UPLOAD_LIMITS.remake}
-              multiple={false}
-              files={remake}
-              onAdd={add(setRemake, true)}
-              onRemove={remove(setRemake)}
-              variant="single"
-            />
-
-            <UploadCard
-              icon={<Music2 size={13} className="text-[#16a34a]" />}
-              iconClass="bg-[#e8f7ec]"
-              title="Licensed Music"
-              optional
-              description="Upload one owned or licensed track for the Director to mix under the cut."
-              dropzoneTitle="Add a music track"
-              {...UPLOAD_LIMITS.music}
-              multiple={false}
-              files={music}
-              onAdd={add(setMusic, true)}
-              onRemove={remove(setMusic)}
-              variant="single"
-            />
-          </div>
-        </div>
-
-        <div className="w-full shrink-0 xl:w-[var(--settings-width)]">
-          <VideoSettings
-            settings={settings}
-            onChange={setSettings}
-            onGenerate={onGenerate}
-            generating={creating}
-            actionLabel="Create Project"
-            busyLabel={
-              uploadProgress === null
-                ? "Creating Project..."
-                : `Uploading Media... ${Math.round(uploadProgress * 100)}%`
-            }
-          />
-        </div>
-      </div>
+      <RemotionTemplateGallery onUseTemplate={useTemplate} />
     </div>
   );
 }

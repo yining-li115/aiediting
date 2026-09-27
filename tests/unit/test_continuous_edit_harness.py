@@ -34,7 +34,12 @@ from aive.contracts.components import (
 from aive.contracts.director import FirstCutDecision
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.patch import PatchScope
-from aive.contracts.patch_project import AddTrack, SetDependencies, SetTimelineDuration
+from aive.contracts.patch_project import (
+    AddTrack,
+    SetDependencies,
+    SetOutputSettings,
+    SetTimelineDuration,
+)
 from aive.contracts.patch_timeline import (
     ReplaceAudioSource,
     ReplaceVisualSource,
@@ -63,6 +68,8 @@ from aive.contracts.project_doc import (
     VideoTrack,
 )
 from aive.contracts.time import FrameRange
+from tests.v2_fixtures import first_cut_decision, source_understanding
+from tests.provider_fakes import FixtureRerankProvider
 
 
 NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
@@ -212,10 +219,12 @@ def _context(
                 source=MediaSourceSpan(start=0, end=2_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                technical_quality=0.9,
-                semantic_status="ready",
-                semantic="A strong opening",
-                semantic_role="opening",
+                understanding=source_understanding(
+                    shot_ids=("shot_1",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="A strong opening",
+                    narrative_function="Open the sequence",
+                ),
             ),
             MomentEvidence(
                 moment_id="moment_replacement",
@@ -226,10 +235,12 @@ def _context(
                 source=MediaSourceSpan(start=0, end=2_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                technical_quality=0.95,
-                semantic_status="ready",
-                semantic="Bright replacement close-up",
-                semantic_role="body",
+                understanding=source_understanding(
+                    shot_ids=("shot_replacement",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="Bright replacement close-up",
+                    narrative_function="Develop the sequence",
+                ),
             ),
         ),
         workspace=WorkspaceSelection(
@@ -258,8 +269,10 @@ class ScriptedProvider:
         return self.decisions.pop(0)
 
     async def create_first_cut(self, context):
-        return FirstCutDecision(
-            moment_ids=("moment_opening",),
+        return first_cut_decision(
+            moment_id="moment_opening",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="unused",
             explanation="unused",
         )
@@ -271,10 +284,13 @@ class ScriptedProvider:
         return decision
 
 
-def test_tool_registry_searches_and_inspects_only_frozen_moments() -> None:
+async def test_tool_registry_searches_and_inspects_only_frozen_moments() -> None:
     context = _context()
-    registry = AgentToolRegistry(context)
-    search = registry.execute(
+    registry = AgentToolRegistry(
+        context,
+        moment_search_provider=FixtureRerankProvider(),
+    )
+    search = await registry.execute_async(
         SearchMomentsCall(
             call_id="call_search",
             query=MomentSearchQuery(text="opening", limit=5),
@@ -320,6 +336,30 @@ def test_tool_registry_allows_only_explicit_ripple_global_edits() -> None:
 
     result = registry.execute(
         ProposePatchCall(call_id="call_ripple", proposal=proposal)
+    )
+
+    assert result.proposal == proposal
+
+
+def test_tool_registry_allows_global_output_orientation_change() -> None:
+    context = _context()
+    registry = AgentToolRegistry(context)
+    proposal = PatchProposal(
+        summary="Switch the project to portrait output",
+        rationale="The requested 9:16 canvas is a project-wide presentation change.",
+        scope=PatchScope(kind="global"),
+        operations=(
+            SetOutputSettings(
+                operation_id="operation_portrait_output",
+                output=context.document.timeline.output.model_copy(
+                    update={"width": 1080, "height": 1920}
+                ),
+            ),
+        ),
+    )
+
+    result = registry.execute(
+        ProposePatchCall(call_id="call_portrait_output", proposal=proposal)
     )
 
     assert result.proposal == proposal
@@ -387,9 +427,12 @@ def test_tool_registry_rejects_visual_timing_without_matching_source_audio() -> 
         )
 
 
-def test_tool_registry_rejects_replacement_that_leaves_old_source_audio() -> None:
-    registry = AgentToolRegistry(_context())
-    _inspect_replacement_moment(registry)
+async def test_tool_registry_rejects_replacement_that_leaves_old_source_audio() -> None:
+    registry = AgentToolRegistry(
+        _context(),
+        moment_search_provider=FixtureRerankProvider(),
+    )
+    await _inspect_replacement_moment(registry)
     proposal = PatchProposal(
         summary="Replace only the picture",
         rationale="This intentionally leaves the old source audio attached.",
@@ -412,9 +455,12 @@ def test_tool_registry_rejects_replacement_that_leaves_old_source_audio() -> Non
         )
 
 
-def test_tool_registry_accepts_replacement_with_matching_source_audio() -> None:
-    registry = AgentToolRegistry(_context())
-    _inspect_replacement_moment(registry)
+async def test_tool_registry_accepts_replacement_with_matching_source_audio() -> None:
+    registry = AgentToolRegistry(
+        _context(),
+        moment_search_provider=FixtureRerankProvider(),
+    )
+    await _inspect_replacement_moment(registry)
     proposal = PatchProposal(
         summary="Replace picture and source audio",
         rationale="Both sides use the inspected replacement Moment range.",
@@ -610,7 +656,10 @@ async def test_harness_runs_search_inspect_and_patch_as_a_bounded_loop() -> None
             ),
         )
     )
-    harness = VideoAgentHarness(provider=provider)
+    harness = VideoAgentHarness(
+        provider=provider,
+        moment_search_provider=FixtureRerankProvider(),
+    )
 
     outcome = await harness.run_edit_turn(_context())
 
@@ -622,8 +671,8 @@ async def test_harness_runs_search_inspect_and_patch_as_a_bounded_loop() -> None
     assert outcome.proposal == proposal
 
 
-def _inspect_replacement_moment(registry: AgentToolRegistry) -> None:
-    search = registry.execute(
+async def _inspect_replacement_moment(registry: AgentToolRegistry) -> None:
+    search = await registry.execute_async(
         SearchMomentsCall(
             call_id="call_search_replacement",
             query=MomentSearchQuery(text="Bright replacement close-up"),

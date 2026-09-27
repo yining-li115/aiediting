@@ -27,13 +27,17 @@ from aive.agent import (
     FirstCutWorkflow,
     RenderReviewApplication,
     VideoAgentHarness,
+    RenderReviewEngine,
 )
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.analysis_repository import SqlAlchemyMediaAnalysisRepository
-from aive.db.models import Asset, Base, Job
+from aive.db.models import Asset, Base, Job, StyleReferenceBlueprintRow
 from aive.db.director_repository import SqlAlchemyDirectorRunRepository
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.db.style_reference_repository import (
+    SqlAlchemyStyleReferenceBlueprintRepository,
+)
 from aive.media.upload import MediaUploadApplication
 from aive.media.analysis import MediaAnalysisApplication
 from aive.media.processing import MediaProcessingApplication
@@ -41,9 +45,18 @@ from aive.jobs import JobRunner
 from aive.project.application import ProjectRevisionApplication
 from aive.project.service import CapabilityUse
 from aive.rendering import ProjectDocFFmpegRenderer, RevisionRenderApplication
+from aive.roles import Role
 from aive.storage import LocalStorage
 from tests.conftest import requires_ffmpeg
-from tests.provider_fakes import FixtureFirstCutDirectorProvider
+from tests.provider_fakes import (
+    FixtureASRProvider,
+    FixtureAudioUnderstandingProvider,
+    FixtureEmbeddingProvider,
+    FixtureFirstCutDirectorProvider,
+    FixtureMaterialUnderstandingProvider,
+    FixtureRenderReviewerProvider,
+    FixtureStyleUnderstandingProvider,
+)
 
 
 class AcceptCapabilities:
@@ -85,9 +98,23 @@ def media_api(tmp_path):
         assets=asset_repository,
         id_factory=lambda _: "job_media_processing",
     )
+    material = FixtureMaterialUnderstandingProvider()
+    embedding = FixtureEmbeddingProvider()
+    asr = FixtureASRProvider()
+    audio = FixtureAudioUnderstandingProvider()
+
+    def provider_factory(role, _project_id):
+        return {
+            Role.MATERIAL: material,
+            Role.EMBEDDING: embedding,
+            Role.ASR: asr,
+            Role.AUDIO: audio,
+        }[role]
+
     analysis = MediaAnalysisApplication(
         storage=storage,
         repository=SqlAlchemyMediaAnalysisRepository(sessions),
+        provider_factory=provider_factory,
         id_factory=lambda _: "job_media_analysis",
     )
     jobs = JobRunner(sessions)
@@ -102,7 +129,12 @@ def media_api(tmp_path):
             "job": "job_render_first_cut_media",
         }[prefix],
     )
-    harness = VideoAgentHarness(provider=FixtureFirstCutDirectorProvider())
+    harness = VideoAgentHarness(
+        provider=FixtureFirstCutDirectorProvider(),
+        render_review_engine=RenderReviewEngine(
+            provider=FixtureRenderReviewerProvider(),
+        ),
+    )
     director = DirectorApplication(
         runs=SqlAlchemyDirectorRunRepository(sessions),
         projects=projects,
@@ -110,6 +142,9 @@ def media_api(tmp_path):
         assets=asset_repository,
         rendering=rendering,
         harness=harness,
+        style_references=SqlAlchemyStyleReferenceBlueprintRepository(sessions),
+        style_understanding=FixtureStyleUnderstandingProvider(),
+        storage=storage,
         id_factory=lambda prefix: {
             "agent_run": "agent_run_first_cut_media",
             "job": "job_director_first_cut_media",
@@ -318,6 +353,99 @@ def test_http_upload_stores_media_and_commits_one_asset_revision(
     current_preview = client.get("/projects/project_media/renders/current")
     assert current_preview.status_code == 200
     assert current_preview.json()["revision_id"] == "revision_first_cut_media"
+
+
+@requires_ffmpeg
+def test_http_style_reference_reaches_director_but_never_the_output(
+    media_api,
+    tmp_path,
+) -> None:
+    client, sessions, _ = media_api
+    initial = _create_project(client)
+    source = tmp_path / "source.mp4"
+    style = tmp_path / "style.mp4"
+    for path, duration, source_filter in (
+        (source, 1, "testsrc2=s=160x284:r=30:d=1"),
+        (style, 2, "testsrc=s=284x160:r=30:d=2"),
+    ):
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                source_filter,
+                "-t",
+                str(duration),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                str(path),
+            ],
+            check=True,
+        )
+    manifest = {
+        "request_id": "request_upload_style_media",
+        "patch_id": "patch_upload_style_media",
+        "project_id": "project_media",
+        "base_revision_id": initial["document"]["revision_id"],
+        "idempotency_key": "upload-project-style-media",
+        "origin": "user",
+        "items": [
+            {"asset_id": "asset_media_001", "roles": ["source"]},
+            {
+                "asset_id": "asset_style_001",
+                "roles": ["reference", "style_reference"],
+            },
+        ],
+    }
+
+    with source.open("rb") as source_handle, style.open("rb") as style_handle:
+        response = client.post(
+            "/projects/project_media/assets",
+            data={"manifest": json.dumps(manifest)},
+            files=[
+                ("files", ("source.mp4", source_handle, "video/mp4")),
+                ("files", ("style.mp4", style_handle, "video/mp4")),
+            ],
+        )
+
+    assert response.status_code == 200
+    run = client.get("/projects/project_media/first-cuts/latest").json()
+    assert run["status"] == "ready"
+    assert len(run["context"]["style_reference_blueprints"]) == 1
+    assert run["context"]["context_version"] == "2.0"
+    assert run["context"]["style_reference_blueprints"][0]["asset_id"] == (
+        "asset_style_001"
+    )
+    assert {asset["asset_id"] for asset in run["context"]["assets"]} == {
+        "asset_media_001"
+    }
+    assert {
+        moment["asset_id"] for moment in run["context"]["moments"]
+    } == {"asset_media_001"}
+    assert run["context"]["style_reference_blueprints"][0]["summary"] == (
+        "A restrained progression that lets images breathe."
+    )
+    assert run["decision"]["edit_blueprint"]["blueprint_version"] == "2.0"
+    current = client.get("/projects/project_media/revisions/current").json()
+    output_asset_ids = {
+        clip["asset_id"]
+        for track in current["document"]["timeline"]["tracks"]
+        for clip in track.get("clips", [])
+    }
+    assert output_asset_ids == {"asset_media_001"}
+    with sessions() as session:
+        blueprints = session.query(StyleReferenceBlueprintRow).all()
+        assert len(blueprints) == 1
+        assert blueprints[0].asset_id == "asset_style_001"
 
 
 def test_rejected_batch_does_not_store_or_commit_any_asset(media_api) -> None:

@@ -17,8 +17,8 @@ from ..material.probe import (
     make_proxy,
     make_thumbnail,
 )
-from ..specs.base import new_id
-from ..specs.segment import Asset
+from ..ids import new_id
+from ..material.types import ProbedAsset
 from ..storage import PROXY, THUMBNAIL, StorageProvider, project_key
 from .repository import (
     AssetProcessingRecord,
@@ -57,8 +57,8 @@ class MediaArtifactDelivery:
     filename: str
 
 
-def _legacy_asset(record: AssetProcessingRecord) -> Asset:
-    return Asset(
+def _probed_asset(record: AssetProcessingRecord) -> ProbedAsset:
+    return ProbedAsset(
         asset_id=record.asset_id,
         project_id=record.project_id,
         storage_key=record.storage_key,
@@ -80,7 +80,7 @@ def _generate_proxy(
 ) -> Path:
     if record.kind == "audio":
         return make_audio_proxy(source, output)
-    asset = _legacy_asset(record)
+    asset = _probed_asset(record)
     if record.kind == "photo":
         return make_photo_proxy(asset, source, output)
     return make_proxy(asset, source, output)
@@ -93,7 +93,7 @@ def _generate_thumbnail(
 ) -> Path:
     if record.kind == "audio":
         return make_audio_thumbnail(source, output)
-    return make_thumbnail(_legacy_asset(record), source, output)
+    return make_thumbnail(_probed_asset(record), source, output)
 
 
 class MediaProcessingApplication:

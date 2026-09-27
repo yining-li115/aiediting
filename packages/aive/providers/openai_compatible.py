@@ -34,30 +34,31 @@ from .. import calllog
 from ..config import settings as _settings  # noqa: F401 - loads .env
 from ..model_registry import ModelCard
 from ..contracts.moments import (
+    AudioEvidence,
+    AudioUnderstanding,
+    MediaEvidence,
     MediaSourceSpan,
+    ModelProvenance,
+    MomentEvidence,
     MomentGroupDecision,
     ShotObservation,
+    SourceUnderstanding,
     TranscriptDraft,
+    UnderstandingEvidence,
+)
+from ..contracts.style_reference import (
+    ObjectiveStyleEvidence,
+    StyleBlueprintDraft,
+    StyleEvidence,
+    StylePattern,
+    TemporalStylePhase,
 )
 from ..roles import Role
-from ..specs.base import ModelAnswer, Spec
-from ..specs.edit_plan import EditPlanSpec, Intent
-from ..specs.enums import (
-    Pace,
-    SemanticRole,
-    ShotType,
-    SubtitleDensity,
-    UserConstraint,
-)
-from ..specs.segment import MaterialSegment, RawSegment
+from .model_answer import ModelAnswer
 from . import prompts
 from .base import BaseProvider, NonRetryable
 from .prompts import PROMPT_VERSION
 from .ratelimit import limiter_for
-
-# Accepted label vocabularies, derived from the enums so they cannot drift.
-SEMANTIC_ROLES: frozenset[str] = frozenset(SemanticRole.__args__)
-SHOT_TYPES: frozenset[str] = frozenset(ShotType.__args__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -88,6 +89,15 @@ class ProviderConfigError(NonRetryable):
 
     Non-retryable on purpose: an unset environment variable does not become
     set by asking again.
+    """
+
+
+class ProviderRequestRejected(NonRetryable):
+    """The provider rejected a well-formed HTTP request.
+
+    Retrying a 4xx request does not change its payload. Keep the provider's
+    response text so the durable Job and the frontend can show the real model
+    integration error instead of a generic status line.
     """
 
 
@@ -264,7 +274,9 @@ class OpenAICompatibleClient:
                 "the model ran out of output tokens mid-answer; raise "
                 "max_tokens for this call"
             )
-        return choice["message"]["content"] or ""
+        # A valid no-speech transcription may be represented by an assistant
+        # message with no ``content`` key rather than an explicit empty string.
+        return choice["message"].get("content") or ""
 
     def _response_format(self, schema: type[BaseModel], mode: str) -> dict | None:
         if mode == "json_schema":
@@ -464,49 +476,71 @@ class OpenAICompatibleProvider(BaseProvider):
         return self.client.rate_limited
 
 
-class Analysis(ModelAnswer):
-    """What the material model must return for one shot.
+class SourceUnderstandingAnswer(ModelAnswer):
+    """Creative model answer before trusted provenance is attached."""
 
-    The categorical fields are typed to the project's vocabulary rather than
-    to `str`. A plain string reaches the model as an unconstrained field, and
-    a capable model answers it well - in its own words. The first real call
-    came back with semantic_role "Attempts to capture the atmosphere of a
-    heavy downpour" and shot_type "Low-angle ground-level medium shot": both
-    accurate, both unusable, and both silently coerced to "unknown", which is
-    0.55 of the matcher's decision weight thrown away.
-
-    Constraining them here puts the vocabulary in the JSON schema, where the
-    model can see it. The Python-side coercion stays as a backstop for models
-    that ignore the schema, not as the way the vocabulary is communicated.
-
-    Note what is absent: camera_motion, timing, and every quality metric.
-    Those are measured deterministically, so asking for them would cost tokens
-    to obtain a worse answer - and, for a single-frame call, an impossible one.
-    """
-
-    # One sentence, not a paragraph. The first real call spent 874 output
-    # tokens, six times what an equivalent call cost elsewhere, almost all of
-    # it on an exhaustive description nothing downstream reads.
-    semantic: str = Field(max_length=200)
-    semantic_role: SemanticRole
-    shot_type: ShotType
-    people: int = Field(ge=0)
-    emotion: list[str] = Field(max_length=3)
-    # Bounded in the schema, not just clamped afterwards: a model answering on
-    # a 0-10 scale would otherwise have every score clipped to 1.0.
-    # TODO(review): both scores are only as good as the wording that asks
-    # for them, and that wording is still a guess - see the TODO next to
-    # `interestingness` in prompts.py. The bounds here only stop a 0-10 answer
-    # from being clipped to 1.0; they do nothing about a model that answers
-    # 0.65 for everything.
-    interestingness: float = Field(ge=0.0, le=1.0)
-    composition_score: float = Field(ge=0.0, le=1.0)
+    summary: str = Field(min_length=1, max_length=1_000)
+    subjects: list[str] = Field(default_factory=list, max_length=24)
+    actions: list[str] = Field(default_factory=list, max_length=24)
+    events: list[str] = Field(default_factory=list, max_length=24)
+    narrative_function: str = Field(min_length=1, max_length=500)
+    visual_language: list[str] = Field(default_factory=list, max_length=24)
+    camera_language: str | None = Field(default=None, max_length=500)
+    emotions: list[str] = Field(default_factory=list, max_length=24)
+    audio_meaning: list[str] = Field(default_factory=list, max_length=24)
+    editorial_value: str = Field(min_length=1, max_length=1_000)
+    recommended_uses: list[str] = Field(default_factory=list, max_length=24)
+    avoid_uses: list[str] = Field(default_factory=list, max_length=24)
     worth_using: bool
-    reason: str = Field(max_length=200)
+    confidence: float = Field(ge=0, le=1)
+    uncertainty: list[str] = Field(default_factory=list, max_length=16)
+    evidence: list[UnderstandingEvidence] = Field(min_length=1)
+
+
+class AudioUnderstandingAnswer(ModelAnswer):
+    evidence_id: str = Field(min_length=1, max_length=512)
+    source: MediaSourceSpan
+    summary: str = Field(min_length=1, max_length=1_000)
+    speech_meaning: list[str] = Field(default_factory=list, max_length=24)
+    sound_events: list[str] = Field(default_factory=list, max_length=24)
+    music_description: str | None = Field(default=None, max_length=1_000)
+    rhythm_and_energy: str | None = Field(default=None, max_length=1_000)
+    emotions: list[str] = Field(default_factory=list, max_length=24)
+    editorial_value: str = Field(min_length=1, max_length=1_000)
+    confidence: float = Field(ge=0, le=1)
+    uncertainty: list[str] = Field(default_factory=list, max_length=16)
+
+
+class MomentGroupAnswer(ModelAnswer):
+    shot_ids: list[str] = Field(min_length=1)
+    understanding: SourceUnderstandingAnswer
 
 
 class MomentGroupingAnswer(ModelAnswer):
-    groups: list[MomentGroupDecision] = Field(min_length=1)
+    groups: list[MomentGroupAnswer] = Field(min_length=1)
+
+
+class StyleBlueprintAnswer(ModelAnswer):
+    summary: str = Field(min_length=1, max_length=4_000)
+    temporal_structure: list[TemporalStylePhase] = Field(min_length=1)
+    narrative_grammar: list[StylePattern] = Field(default_factory=list)
+    shot_grammar: list[StylePattern] = Field(default_factory=list)
+    transition_grammar: list[StylePattern] = Field(default_factory=list)
+    motion_grammar: list[StylePattern] = Field(default_factory=list)
+    color_and_composition: list[StylePattern] = Field(default_factory=list)
+    audio_visual_relationship: list[StylePattern] = Field(default_factory=list)
+    caption_and_graphic_language: list[StylePattern] = Field(default_factory=list)
+    transferable_principles: list[str] = Field(min_length=1, max_length=32)
+    avoid_copying: list[str] = Field(min_length=1, max_length=32)
+    evidence: list[StyleEvidence] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    uncertainty: list[str] = Field(default_factory=list, max_length=16)
+
+
+class RerankAnswer(ModelAnswer):
+    """Semantic relevance scores in the exact supplied candidate order."""
+
+    scores: list[float] = Field(min_length=1)
 
 
 class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
@@ -519,15 +553,17 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
 
     role = Role.MATERIAL
 
-    async def analyze_segment(
+    async def understand_source(
         self,
-        segment: RawSegment,
-        keyframes: list[Path],
+        evidence: MediaEvidence,
+        samples: list[Path],
         clip: Path | None = None,
-    ) -> MaterialSegment:
-        async def _run() -> MaterialSegment:
-            self.client.subject = segment.segment_id
-            frames = [p for p in keyframes if p.exists()]
+    ) -> SourceUnderstanding:
+        async def _run() -> SourceUnderstanding:
+            self.client.subject = evidence.evidence_id
+            frames = [path for path in samples if path.exists()]
+            if not frames and not (clip is not None and clip.exists()):
+                raise ValueError("source understanding requires visual evidence")
 
             # A clip when one was cut and the model takes video; otherwise the
             # frames. A still cannot show which moment in a shot is the good
@@ -546,7 +582,11 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
             content: list[dict[str, Any]] = [
                 text_part(
                     prompts.MATERIAL_USER.format(
-                        duration=segment.duration,
+                        evidence=json.dumps(
+                            evidence.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         context=context,
                     )
                 )
@@ -559,12 +599,20 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
                 content += [image_part(path) for path in frames[:1]]
 
             analysis = await self.client.complete_structured(
-                prompts.MATERIAL_SYSTEM, content, Analysis
+                prompts.MATERIAL_SYSTEM, content, SourceUnderstandingAnswer
             )
             self._finish()
-            return _to_segment(segment, analysis, frames)
+            return _to_source_understanding(
+                analysis,
+                provider=self.name,
+                model=self.model,
+                prompt_version=self.prompt_version,
+            )
 
-        return await self._guarded(_run, seconds_processed=segment.duration)
+        duration = (
+            evidence.source.end - evidence.source.start
+        ) / evidence.source.timescale
+        return await self._guarded(_run, seconds_processed=duration)
 
     async def group_moments(
         self, shots: tuple[ShotObservation, ...]
@@ -588,13 +636,139 @@ class OpenAICompatibleMaterialProvider(OpenAICompatibleProvider):
                 max_tokens=2048,
             )
             self._finish()
-            return tuple(answer.groups)
+            return tuple(
+                MomentGroupDecision(
+                    shot_ids=tuple(group.shot_ids),
+                    understanding=_to_source_understanding(
+                        group.understanding,
+                        provider=self.name,
+                        model=self.model,
+                        prompt_version=self.prompt_version,
+                    ),
+                )
+                for group in answer.groups
+            )
 
         return await self._guarded(_run)
 
 
+class OpenAICompatibleAudioProvider(OpenAICompatibleProvider):
+    """Interpret raw audio with a closed, evidence-bound model answer."""
+
+    role = Role.AUDIO
+
+    async def understand_audio(
+        self,
+        evidence: AudioEvidence,
+        audio: Path,
+    ) -> AudioUnderstanding:
+        if not audio.exists():
+            raise FileNotFoundError(audio)
+        with wave.open(str(audio), "rb") as wav:
+            duration_seconds = wav.getnframes() / max(wav.getframerate(), 1)
+
+        async def _run() -> AudioUnderstanding:
+            self.client.subject = evidence.evidence_id
+            encoded_audio = base64.b64encode(audio.read_bytes()).decode("ascii")
+            answer = await self.client.complete_structured(
+                prompts.AUDIO_SYSTEM,
+                [
+                    text_part(
+                        prompts.AUDIO_USER.format(
+                            evidence=json.dumps(
+                                evidence.model_dump(mode="json"),
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                        )
+                    ),
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": encoded_audio,
+                            "format": "wav",
+                        },
+                    },
+                ],
+                AudioUnderstandingAnswer,
+                max_tokens=2048,
+            )
+            self._finish()
+            if answer.evidence_id != evidence.evidence_id:
+                raise ValueError("audio model cited evidence that was not supplied")
+            if answer.source != evidence.source:
+                raise ValueError("audio model changed the supplied source range")
+            return AudioUnderstanding(
+                **answer.model_dump(),
+                provenance=ModelProvenance(
+                    provider=self.name,
+                    model=self.model,
+                    prompt_version=self.prompt_version,
+                ),
+            )
+
+        return await self._guarded(_run, seconds_processed=duration_seconds)
+
+
+class OpenAICompatibleStyleProvider(OpenAICompatibleProvider):
+    """Extract a transferable grammar without reducing taste to thresholds."""
+
+    role = Role.STYLE
+
+    async def understand_style(
+        self,
+        video: Path,
+        objective: ObjectiveStyleEvidence,
+        moments: tuple[MomentEvidence, ...],
+    ) -> StyleBlueprintDraft:
+        async def _run() -> StyleBlueprintDraft:
+            if not video.exists():
+                raise FileNotFoundError(video)
+            if not self.card.accepts_video:
+                raise ProviderConfigError(
+                    f"style model {self.card.key!r} cannot receive video"
+                )
+            self.client.subject = f"style:{video.name}"
+            answer = await self.client.complete_structured(
+                prompts.STYLE_SYSTEM,
+                [
+                    text_part(
+                        prompts.STYLE_USER.format(
+                            objective=json.dumps(
+                                objective.model_dump(mode="json"),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            moments=json.dumps(
+                                [moment.model_dump(mode="json") for moment in moments],
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        )
+                    ),
+                    video_part(video),
+                ],
+                StyleBlueprintAnswer,
+                max_tokens=8192,
+            )
+            self._finish()
+            return StyleBlueprintDraft(
+                **answer.model_dump(),
+                provenance=ModelProvenance(
+                    provider=self.name,
+                    model=self.model,
+                    prompt_version=self.prompt_version,
+                ),
+            )
+
+        return await self._guarded(
+            _run,
+            seconds_processed=objective.duration_seconds,
+        )
+
+
 class OpenAICompatibleASRProvider(OpenAICompatibleProvider):
-    """Qwen3-ASR-compatible local audio upload.
+    """OpenAI-compatible inline audio transcription.
 
     This synchronous endpoint returns text without timestamps, so the media
     service supplies one bounded physical-shot audio window per call and owns
@@ -602,14 +776,21 @@ class OpenAICompatibleASRProvider(OpenAICompatibleProvider):
     """
 
     role = Role.ASR
+    requires_remote_url = False
 
-    async def transcribe(self, audio: Path) -> tuple[TranscriptDraft, ...]:
+    async def transcribe(
+        self,
+        audio: Path,
+        *,
+        source_url: str | None = None,
+    ) -> tuple[TranscriptDraft, ...]:
         with wave.open(str(audio), "rb") as wav:
             duration_seconds = wav.getnframes() / max(wav.getframerate(), 1)
         duration_ms = max(1, round(duration_seconds * 1_000))
 
         async def _run() -> tuple[TranscriptDraft, ...]:
             self.client.subject = audio.name
+            encoded_audio = base64.b64encode(audio.read_bytes()).decode("ascii")
             payload = {
                 "model": self.client.model_id,
                 "messages": [
@@ -617,16 +798,38 @@ class OpenAICompatibleASRProvider(OpenAICompatibleProvider):
                         "role": "user",
                         "content": [
                             {
+                                "type": "text",
+                                "text": (
+                                    "Transcribe the speech in this audio faithfully. "
+                                    "Return only the transcript; return an empty "
+                                    "response when there is no speech."
+                                ),
+                            },
+                            {
                                 "type": "input_audio",
-                                "input_audio": {"data": data_url(audio)},
+                                "input_audio": {
+                                    "data": encoded_audio,
+                                    "format": "wav",
+                                },
                             }
                         ],
                     }
                 ],
                 "stream": False,
-                "asr_options": {"enable_itn": True},
             }
-            body = await self.client._post(payload)
+            try:
+                body = await self.client._post(payload)
+            except httpx.HTTPStatusError as exc:
+                if 400 <= exc.response.status_code < 500:
+                    detail = (
+                        exc.response.text.strip()[:2_000]
+                        or exc.response.reason_phrase
+                    )
+                    raise ProviderRequestRejected(
+                        f"{self.card.key} rejected the audio request with HTTP "
+                        f"{exc.response.status_code}: {detail}"
+                    ) from exc
+                raise
             text = self.client._content(body).strip()
             message = body["choices"][0]["message"]
             audio_info = next(
@@ -652,395 +855,68 @@ class OpenAICompatibleASRProvider(OpenAICompatibleProvider):
         return await self._guarded(_run, seconds_processed=duration_seconds)
 
 
-def _to_segment(
-    raw: RawSegment, analysis: Analysis, frames: list[Path]
-) -> MaterialSegment:
-    """Map a model answer onto the domain model, rejecting unknown labels.
+class OpenAICompatibleRerankProvider(OpenAICompatibleProvider):
+    """Model-owned semantic ranking over model-authored source descriptions."""
 
-    A model that invents a shot type must not silently poison the pool: an
-    unrecognised value becomes "unknown", which the matcher already treats as
-    a weak match rather than a confident wrong one.
-    """
-    return MaterialSegment(
-        segment_id=raw.segment_id,
-        project_id=raw.project_id,
-        source_id=raw.asset_id,
-        start=raw.start,
-        end=raw.end,
-        semantic=analysis.semantic,
-        semantic_role=_coerce(analysis.semantic_role, SEMANTIC_ROLES),
-        shot_type=_coerce(analysis.shot_type, SHOT_TYPES),
-        people=max(0, analysis.people),
-        emotion=[e.strip().lower() for e in analysis.emotion if e.strip()],
-        interestingness=_clip01(analysis.interestingness),
-        composition_score=_clip01(analysis.composition_score),
-        keyframe_keys=[],
-        # The model's "worth using" verdict is recorded but does not by itself
-        # reject a segment: the deterministic pass owns is_usable, and a model
-        # that is wrong about content should not be able to empty the pool.
-        reject_reason=None if analysis.worth_using else f"model:{analysis.reason[:80]}",
+    role = Role.RERANK
+
+    async def rerank(self, query: str, candidates: list[str]) -> list[float]:
+        if not query.strip():
+            raise ValueError("semantic reranking requires a non-empty query")
+        if not candidates:
+            return []
+
+        async def _run() -> list[float]:
+            self.client.subject = "moment-search"
+            answer = await self.client.complete_structured(
+                (
+                    "Rank supplied video Moments for the user's semantic request. "
+                    "Judge meaning, narrative usefulness, emotion, visual language, "
+                    "audio meaning, and transcript evidence. Do not infer missing "
+                    "content. Return one relevance score from 0 to 1 for every "
+                    "candidate, in exactly the supplied order."
+                ),
+                [
+                    text_part(
+                        json.dumps(
+                            {"query": query, "candidates": candidates},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+                ],
+                RerankAnswer,
+                temperature=0.0,
+                max_tokens=max(512, len(candidates) * 24),
+            )
+            self._finish()
+            if len(answer.scores) != len(candidates):
+                raise ValueError(
+                    "reranker must return exactly one score per candidate"
+                )
+            if any(score < 0 or score > 1 for score in answer.scores):
+                raise ValueError("reranker scores must be between zero and one")
+            return answer.scores
+
+        return await self._guarded(_run)
+
+
+def _to_source_understanding(
+    answer: SourceUnderstandingAnswer,
+    *,
+    provider: str,
+    model: str,
+    prompt_version: str,
+) -> SourceUnderstanding:
+    return SourceUnderstanding(
+        **answer.model_dump(),
+        provenance=ModelProvenance(
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+        ),
     )
-
-
-def _coerce(value: str, allowed: frozenset[str]) -> str:
-    cleaned = (value or "").strip().lower().replace(" ", "_").replace("-", "_")
-    return cleaned if cleaned in allowed else "unknown"
-
-
-def _clip01(value: float) -> float:
-    return float(min(1.0, max(0.0, value)))
-
-
-class IntentAnswer(ModelAnswer):
-    """What the model must return for a prompt.
-
-    Every optional field defaults to None and MUST stay that way. This schema
-    is the only place in the pipeline where "the user did not say" is still
-    recoverable - one step later it is merged against the reference video, and
-    a default filled in here would beat that reference while looking exactly
-    like something the user asked for.
-
-    ``user_constraints`` is typed to the canonical vocabulary so the JSON
-    schema constrains the model to values the planner actually acts on. Free
-    text here would be extracted, stored, and then silently ignored - the user
-    would watch their instruction be accepted and disregarded.
-
-    ``style`` and ``mood`` stay open: an unrecognised tag still feeds emotion
-    matching, and it is a useful signal about vocabulary worth adding.
-    """
-
-    target_duration_sec: float | None = None
-    content_type: str | None = Field(default=None, max_length=40)
-
-    mood: list[str] = Field(default_factory=list, max_length=5)
-    style: list[str] = Field(default_factory=list, max_length=5)
-    negative_style: list[str] = Field(default_factory=list, max_length=5)
-
-    overall_pace: Pace | None = None
-    opening_pace: Pace | None = None
-
-    prioritize: list[str] = Field(default_factory=list, max_length=5)
-    avoid: list[str] = Field(default_factory=list, max_length=5)
-
-    subtitle_density: SubtitleDensity | None = None
-    keep_original_audio: bool | None = None
-    use_music: bool | None = None
-
-    user_constraints: list[UserConstraint] = Field(
-        default_factory=list, max_length=9
-    )
-
-
-def _tags(values: list[str]) -> list[str]:
-    """Lowercased, trimmed, de-duplicated, order preserved."""
-    cleaned = [v.strip().lower() for v in values if v and v.strip()]
-    return list(dict.fromkeys(cleaned))
 
 
 class TruncatedAnswer(ValueError):
     """The response was cut off by max_tokens, not malformed by the model."""
-
-
-class OpenAICompatibleIntentProvider(OpenAICompatibleProvider):
-    """Role 3a: a sentence becomes structured constraints.
-
-    Its whole job is to lose nothing and invent nothing. It does not decide how
-    the video is cut and is never given the footage - what it produces is one
-    input to that decision, weighed against the reference video and the project
-    state by ``planner.merge``.
-    """
-
-    role = Role.INTENT
-
-    async def parse_intent(self, prompt: str) -> Intent:
-        async def _run() -> Intent:
-            answer = await self.client.complete_structured(
-                prompts.INTENT_SYSTEM,
-                [text_part(prompts.INTENT_USER.format(prompt=prompt))],
-                IntentAnswer,
-                max_tokens=512,
-            )
-            self._finish()
-
-            intent = Intent(raw_prompt=prompt)
-            if answer.target_duration_sec:
-                intent.target_duration = float(answer.target_duration_sec)
-                # The distinction the whole precedence chain rests on: a
-                # duration the user stated outranks a reference video, the
-                # default 45s does not.
-                intent.duration_stated = True
-
-            intent.content_type = answer.content_type
-            intent.mood = _tags(answer.mood)
-            intent.style = _tags(answer.style)
-            intent.negative_style = _tags(answer.negative_style)
-
-            intent.rhythm.overall_pace = answer.overall_pace
-            intent.rhythm.opening_pace = answer.opening_pace
-            intent.content.prioritize = _tags(answer.prioritize)
-            intent.content.avoid = _tags(answer.avoid)
-            intent.text.subtitle_density = answer.subtitle_density
-            intent.audio.keep_original_audio = answer.keep_original_audio
-            intent.audio.use_music = answer.use_music
-
-            # Already constrained to the canonical vocabulary by the schema;
-            # deduplicated because models repeat themselves when a prompt says
-            # the same thing twice.
-            intent.user_constraints = list(dict.fromkeys(answer.user_constraints))
-            return intent
-
-        return await self._guarded(_run)
-
-
-class OpenAICompatiblePlannerProvider(OpenAICompatibleProvider):
-    """Role 3b: conditioning plus an inventory becomes a plan.
-
-    The model sees no clips, only how many seconds of each kind of shot exist.
-    That is the whole point of the two-layer split: a plan that named specific
-    clips could not be re-matched against different footage, and the model is
-    worse at picking clips than the matcher's scoring is.
-    """
-
-    role = Role.PLANNER
-
-    async def generate_plans(
-        self, context: dict[str, Any], n: int, seed: int
-    ) -> list[EditPlanSpec]:
-        """One model call, then deterministic variation for the rest.
-
-        Not n calls: candidates have to differ *by construction* for best-of-N
-        to measure choice rather than sampler noise, and re-rolling the same
-        prompt at a higher temperature produces plans that differ in wording
-        and agree in structure. The model decides the shape; the variants
-        perturb one editing decision each, the same way they do without a
-        model.
-        """
-        from ..planner import PlanningContext, generate_plans as build  # noqa: PLC0415
-        from ..planner.draft import DraftRejected, PlanDraft, to_plan  # noqa: PLC0415
-        from ..planner.merge import Conditioning  # noqa: PLC0415
-        from ..planner.perturb import derive  # noqa: PLC0415
-
-        intent: Intent = context.get("intent") or Intent(
-            target_duration=float(context.get("target_duration", 45.0))
-        )
-        conditioning: Conditioning = context.get("conditioning") or Conditioning(
-            target_duration=intent.target_duration
-        )
-        pool = context.get("pool_summary") or {}
-        project_id = str(context.get("project_id", "proj"))
-
-        planning = PlanningContext(
-            project_id=project_id,
-            intent=intent,
-            pool_summary=pool,
-            conditioning=conditioning,
-        )
-
-        async def _run() -> list[EditPlanSpec]:
-            draft = await self.client.complete_structured(
-                prompts.PLANNER_SYSTEM,
-                [
-                    text_part(
-                        prompts.PLANNER_USER.format(
-                            duration=conditioning.target_duration,
-                            intent=_describe_intent(intent, conditioning),
-                            grammar=_describe_grammar(conditioning),
-                            inventory=_describe_inventory(pool),
-                        )
-                    )
-                ],
-                PlanDraft,
-                # The largest object anything in the pipeline asks for: a
-                # 12-section plan of 80 slots. Truncation here costs a full
-                # call, so the ceiling is set well above the observed peak
-                # (~2,600 output tokens) rather than close to it.
-                max_tokens=8192,
-            )
-            self._finish()
-            base = to_plan(
-                draft,
-                project_id=project_id,
-                intent=intent,
-                conditioning=conditioning,
-                pool_summary=pool,
-                candidate_index=0,
-                seed=seed,
-            )
-            return [base] + derive(base, n - 1, seed)
-
-        try:
-            return await self._guarded(_run)
-        except (DraftRejected, ValidationError) as exc:
-            # A plan the code could not repair is not shipped: the rule planner
-            # produces a worse edit but a valid one. Recorded rather than
-            # swallowed, because "the model planned this" and "the fallback
-            # planned this" must never look the same afterwards.
-            self.report_provenance(
-                planner_fallback=f"{type(exc).__name__}: {exc}"
-            )
-            plans = build(planning, n, seed)
-            for plan in plans:
-                plan.provenance.extra["source"] = "rules_fallback"
-                plan.provenance.extra["fallback_reason"] = str(exc)
-            return plans
-
-
-def _describe_intent(intent: Intent, conditioning: Conditioning) -> str:
-    """Only what the user actually expressed, in plain lines.
-
-    Fields nobody set are omitted rather than printed as null: a wall of
-    "null" teaches the model that most of the answer is nothing, and it starts
-    returning nothing.
-    """
-    lines: list[str] = []
-    if intent.raw_prompt:
-        lines.append(f'in their words: "{intent.raw_prompt}"')
-    if intent.content_type:
-        lines.append(f"kind of video: {intent.content_type}")
-    if conditioning.mood:
-        lines.append(f"mood: {', '.join(conditioning.mood)}")
-    if conditioning.style:
-        lines.append(f"style: {', '.join(conditioning.style)}")
-    if conditioning.negative_style:
-        lines.append(f"avoid this feel: {', '.join(conditioning.negative_style)}")
-    lines.append(f"pace: {conditioning.pace}")
-    if conditioning.opening_pace:
-        lines.append(f"opening pace: {conditioning.opening_pace}")
-    if conditioning.prioritize:
-        lines.append(f"show more of: {', '.join(conditioning.prioritize)}")
-    if conditioning.avoid:
-        lines.append(f"show less of: {', '.join(conditioning.avoid)}")
-    lines.append(
-        f"transitions: {'none' if conditioning.transition_density <= 0 else f'about {conditioning.transition_density:.0%} of cuts'}"
-    )
-    lines.append(f"subtitles: {conditioning.subtitle_density}")
-    lines.append(f"music: {'yes' if conditioning.use_music else 'no'}")
-    if conditioning.keep_original_sound:
-        lines.append("keep the footage's own sound")
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _describe_grammar(conditioning: Conditioning) -> str:
-    """The style prior, or an explicit statement that there is none."""
-    if not conditioning.shot_scale_distribution and not conditioning.shot_duration:
-        return (
-            "- no reference videos were given; decide the grammar yourself from "
-            "the request and the footage"
-        )
-    lines: list[str] = []
-    stats = conditioning.shot_duration
-    if stats:
-        lines.append(
-            f"shot length: median {stats.median:.2f}s, "
-            f"typical range {stats.p10:.2f}-{stats.p90:.2f}s"
-        )
-    if conditioning.shot_scale_distribution:
-        lines.append(
-            "shot scale mix: "
-            + ", ".join(
-                f"{k} {v:.0%}"
-                for k, v in sorted(
-                    conditioning.shot_scale_distribution.items(),
-                    key=lambda kv: -kv[1],
-                )
-            )
-        )
-    if conditioning.shot_scale_bigrams:
-        top = sorted(
-            conditioning.shot_scale_bigrams.items(), key=lambda kv: -kv[1]
-        )[:6]
-        lines.append(
-            "what follows what: " + ", ".join(f"{k} {v:.0%}" for k, v in top)
-        )
-    if conditioning.role_bigrams:
-        top = sorted(conditioning.role_bigrams.items(), key=lambda kv: -kv[1])[:6]
-        lines.append(
-            "subject order: " + ", ".join(f"{k} {v:.0%}" for k, v in top)
-        )
-    if conditioning.section_count:
-        lines.append(f"typical section count: {conditioning.section_count:.0f}")
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _describe_inventory(pool: dict[str, Any]) -> str:
-    """How much of each kind of shot exists, as seconds and counts.
-
-    Seconds as well as counts because "3 food shots" does not say whether that
-    is 2 seconds or 20, and a plan that asks for more than exists is the single
-    most common way a plan becomes unfillable.
-    """
-    from ..matcher.assign import MAX_USES_PER_SOURCE  # noqa: PLC0415
-
-    by_role = pool.get("by_semantic_role") or {}
-    if not by_role:
-        return "- (no footage analysed)"
-    total = pool.get("total_usable_duration")
-    lines = [
-        f"{role}: {info.get('count', 0)} shots, "
-        f"{float(info.get('total_duration', 0.0)):.1f}s total"
-        for role, info in sorted(
-            by_role.items(), key=lambda kv: -float(kv[1].get("total_duration", 0.0))
-        )
-    ]
-    distinct = sum(int(info.get("count", 0)) for info in by_role.values())
-    if total:
-        lines.append(f"all usable footage: {float(total):.1f}s")
-    if distinct:
-        # The ceiling on how many cuts this pool can produce at all. Without
-        # it the model reads "shot length: median 0.65s" and a 24-second
-        # target as a request for 36 slots, sees only that the seconds add up,
-        # and plans an edit nothing can fill. Reuse is capped downstream, so
-        # this is arithmetic, not a preference.
-        lines.append(
-            f"distinct shots: {distinct}, each usable at most "
-            f"{MAX_USES_PER_SOURCE} times -> at most "
-            f"{distinct * MAX_USES_PER_SOURCE} cuts in total"
-        )
-    return "\n".join(f"- {line}" for line in lines)
-
-
-class Verdict(ModelAnswer):
-    choice: str  # "A" | "B" | "tie"
-    reasons: list[str] = []
-    confidence: float = 0.0
-    explanation: str = ""
-
-
-class OpenAICompatibleCriticProvider(OpenAICompatibleProvider):
-    """Role 5: which of two edits is better.
-
-    Pairwise rather than a score, because asking a human - or a model - for an
-    absolute 1-10 rating of an edit is far less stable than asking which of two
-    is better.
-    """
-
-    role = Role.CRITIC
-
-    async def compare(
-        self, a: dict[str, Any], b: dict[str, Any], context: dict[str, Any]
-    ) -> dict[str, Any]:
-        async def _run() -> dict[str, Any]:
-            verdict = await self.client.complete_structured(
-                prompts.CRITIC_SYSTEM,
-                [
-                    text_part(
-                        prompts.CRITIC_USER.format(
-                            goal=context.get("goal", "an appealing short vlog"),
-                            edit_a=json.dumps(a, ensure_ascii=False, indent=2),
-                            edit_b=json.dumps(b, ensure_ascii=False, indent=2),
-                        )
-                    )
-                ],
-                Verdict,
-                max_tokens=512,
-            )
-            self._finish()
-            choice = verdict.choice.strip().upper()
-            return {
-                "choice": choice if choice in {"A", "B"} else "tie",
-                "reasons": verdict.reasons,
-                "confidence": _clip01(verdict.confidence),
-                "explanation": verdict.explanation,
-            }
-
-        return await self._guarded(_run)

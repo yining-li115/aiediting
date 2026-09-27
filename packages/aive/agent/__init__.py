@@ -24,12 +24,12 @@ from .provider import (
     DirectorProvider,
     DirectorProviderError,
     OpenAICompatibleDirectorProvider,
+    OpenAICompatibleRenderReviewerProvider,
     RenderReviewerProviderError,
     VolcanoDirectorProvider,
     VolcanoRenderReviewerProvider,
 )
 from .render_review import (
-    OfflineRenderReviewerProvider,
     OpenCVRenderInspector,
     RenderReviewEngine,
     RenderReviewOutcome,
@@ -82,7 +82,7 @@ __all__ = [
     "FirstCutReviewer",
     "MomentSearchHit",
     "MomentSearchQuery",
-    "OfflineRenderReviewerProvider",
+    "OpenAICompatibleRenderReviewerProvider",
     "OpenCVRenderInspector",
     "RenderReviewEngine",
     "RenderReviewOutcome",

@@ -96,6 +96,7 @@ class Asset(Base, TimestampMixin):
     )
     analysis_error: Mapped[str | None] = mapped_column(Text)
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    audio_analysis_json: Mapped[dict | None] = mapped_column(JSON)
     kind: Mapped[str] = mapped_column(String(16), default="video")
     original_name: Mapped[str | None] = mapped_column(Text)
     # Content hash: identifies duplicate uploads, which are common when people
@@ -233,6 +234,7 @@ class MomentRow(Base, TimestampMixin):
     timescale: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000)
     analysis_window_count: Mapped[int] = mapped_column(Integer, nullable=False)
     keyframe_keys_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    understanding_json: Mapped[dict | None] = mapped_column(JSON)
     technical_quality: Mapped[float | None] = mapped_column(Float)
     sharpness: Mapped[float | None] = mapped_column(Float)
     exposure_score: Mapped[float | None] = mapped_column(Float)
@@ -262,6 +264,31 @@ class MomentRow(Base, TimestampMixin):
     has_speech: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     asr_text: Mapped[str | None] = mapped_column(Text)
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StyleReferenceBlueprintRow(Base):
+    """Insert-only, content-addressed Style Reference grammar."""
+
+    __tablename__ = "style_reference_blueprints"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "asset_id",
+            "evidence_hash",
+            name="uq_style_blueprints_project_asset_evidence",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False, index=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("assets.id"), nullable=False, index=True
+    )
+    blueprint_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    blueprint_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Reference(Base, TimestampMixin):

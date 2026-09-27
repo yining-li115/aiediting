@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..contracts.conversation import (
+    AgentToolCall,
     AgentToolStep,
     AgentToolResult,
     AgentTurnContext,
@@ -15,7 +15,9 @@ from ..contracts.conversation import (
     ProposePatchCall,
 )
 from .provider import DirectorProvider
+from .preview_evidence import PreviewAnnotationImage
 from .tools import AgentToolPermissionError, AgentToolRegistry, ComponentAgentTools
+from ..providers.roles import RerankProvider
 
 
 class AgentToolStepLimitExceeded(RuntimeError):
@@ -41,17 +43,22 @@ class ContinuousEditPipeline:
         provider: DirectorProvider,
         *,
         component_tools: ComponentAgentTools | None = None,
+        moment_search_provider: RerankProvider | None = None,
     ) -> None:
         self._provider = provider
         self._component_tools = component_tools
+        self._moment_search_provider = moment_search_provider
 
     async def run(
         self,
         context: AgentTurnContext,
         *,
         existing_steps: tuple[AgentToolStep, ...] = (),
+        on_model_start: Callable[[int], None] | None = None,
+        on_tool_start: Callable[[int, AgentToolCall], None] | None = None,
         on_step: Callable[[AgentToolStep], None] | None = None,
         proposal_validator: Callable[[PatchProposal], None] | None = None,
+        annotation_images: tuple[PreviewAnnotationImage, ...] = (),
     ) -> ContinuousEditOutcome:
         steps = list(existing_steps)
         _validate_existing_steps(context, steps)
@@ -68,10 +75,20 @@ class ContinuousEditPipeline:
             proposal_validator=proposal_validator,
             prior_steps=tuple(steps),
             component_tools=self._component_tools,
+            moment_search_provider=self._moment_search_provider,
         )
         seen_call_ids = {step.call.call_id for step in steps}
         while len(steps) < context.max_tool_steps:
-            decision = await self._provider.next_edit_step(context, tuple(steps))
+            if on_model_start is not None:
+                on_model_start(len(steps))
+            if annotation_images:
+                decision = await self._provider.next_edit_step(
+                    context,
+                    tuple(steps),
+                    annotation_images=annotation_images,
+                )
+            else:
+                decision = await self._provider.next_edit_step(context, tuple(steps))
             if decision.kind == "finish":
                 assert decision.response is not None
                 return ContinuousEditOutcome(
@@ -85,8 +102,10 @@ class ContinuousEditPipeline:
                 raise AgentToolLoopError(
                     f"provider reused tool call ID {decision.call.call_id!r}"
                 )
+            if on_tool_start is not None:
+                on_tool_start(len(steps), decision.call)
             try:
-                result = await asyncio.to_thread(registry.execute, decision.call)
+                result = await registry.execute_async(decision.call)
             except AgentToolPermissionError as exc:
                 if not isinstance(
                     decision.call,

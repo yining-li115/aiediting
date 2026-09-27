@@ -15,12 +15,17 @@ from aive.contracts.conversation import (
     MomentSearchQuery,
     PatchProposal,
     PreviewAnnotation,
+    PreviewSpatialRegion,
     ProposePatchCall,
     SearchMomentsCall,
     WorkspaceSelection,
 )
 from aive.contracts.patch import PatchScope
-from aive.contracts.patch_project import SetCreativePlan, SetTimelineDuration
+from aive.contracts.patch_project import (
+    SetCreativePlan,
+    SetOutputSettings,
+    SetTimelineDuration,
+)
 from aive.contracts.patch_project import AddTrack
 from aive.contracts.patch_timeline import (
     DeleteAudioClip,
@@ -130,6 +135,29 @@ def test_preview_annotations_are_revision_bound_and_unique() -> None:
             revision_id="revision_current",
             preview_annotations=(annotation, annotation),
         )
+
+
+def test_preview_spatial_region_uses_normalized_video_content_coordinates() -> None:
+    region = PreviewSpatialRegion(
+        x=0.2,
+        y=0.1,
+        width=0.4,
+        height=0.3,
+    )
+    annotation = PreviewAnnotation(
+        annotation_id="annotation_spatial",
+        revision_id="revision_current",
+        artifact_id="artifact_preview",
+        output_range=FrameRange(start_frame=45, duration_frames=1),
+        spatial_region=region,
+        comment="把这个区域里的标题移高一点。",
+    )
+
+    assert annotation.spatial_region == region
+    with pytest.raises(ValidationError, match="horizontal bounds"):
+        PreviewSpatialRegion(x=0.8, y=0.1, width=0.3, height=0.2)
+    with pytest.raises(ValidationError, match="vertical bounds"):
+        PreviewSpatialRegion(x=0.1, y=0.9, width=0.2, height=0.2)
 
 
 def test_agent_turn_context_is_project_revision_and_conversation_scoped() -> None:
@@ -318,6 +346,28 @@ def test_continuous_patch_contract_accepts_renderable_crop_and_reframe() -> None
         "set_visual_crop",
         "set_visual_reframe",
     ]
+
+
+def test_continuous_patch_contract_accepts_output_orientation_change() -> None:
+    proposal = PatchProposal(
+        summary="将视频调整为竖屏",
+        rationale="用户明确要求把成片输出画布改为 9:16。",
+        scope=PatchScope(kind="global"),
+        operations=(
+            SetOutputSettings(
+                operation_id="operation_portrait_output",
+                output=OutputSettings(
+                    width=1080,
+                    height=1920,
+                    fps=Rational(num=30, den=1),
+                ),
+            ),
+        ),
+    )
+
+    assert proposal.operations[0].op == "set_output_settings"
+    assert proposal.operations[0].output.width == 1080
+    assert proposal.operations[0].output.height == 1920
 
 
 def test_continuous_patch_contract_accepts_caption_and_music_layers() -> None:

@@ -59,16 +59,13 @@ class RenderInspection(ContractModel):
     has_video: bool
     has_audio: bool
     sampled_frame_count: int = Field(ge=0, le=20)
-    black_frame_ratio: float = Field(ge=0, le=1)
-    flat_frame_ratio: float = Field(ge=0, le=1)
-    mean_sharpness: float = Field(ge=0, le=1)
     sample_offsets_seconds: tuple[float, ...] = Field(default=(), max_length=20)
 
 
 class RenderReviewContext(ContractModel):
     """Frozen, revision-bound evidence supplied to the render Reviewer."""
 
-    context_version: Literal["1.0"] = "1.0"
+    context_version: Literal["2.0"] = "2.0"
     project_id: DatabaseId
     revision_id: StableId
     document_hash: str = Field(
@@ -110,6 +107,7 @@ class RenderCreativeReview(ContractModel):
     """Untrusted creative judgment returned by a Reviewer provider."""
 
     visual_review_performed: bool
+    audio_review_performed: bool = False
     issues: tuple[RenderReviewIssue, ...] = ()
     summary: str = Field(min_length=1, max_length=2_000)
 
@@ -124,6 +122,7 @@ class RenderReviewReport(ContractModel):
     artifact_id: StableId
     accepted: bool
     visual_review_performed: bool
+    audio_review_performed: bool = False
     issues: tuple[RenderReviewIssue, ...] = ()
     summary: str = Field(min_length=1, max_length=2_000)
     provider: str = Field(min_length=1, max_length=128)

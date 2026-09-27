@@ -83,7 +83,9 @@ def test_http_conversation_turn_commits_edit_and_returns_agent_explanation(
     assert conversation_response.status_code == 200
     messages = conversation_response.json()["messages"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
-    assert "ProjectService" in messages[-1]["content"]
+    assert "ProjectService" not in messages[-1]["content"]
+    assert turn["result_revision_id"] not in messages[-1]["content"]
+    assert "调整音量" in messages[-1]["content"]
     assert messages[-1]["result_revision_id"] == turn["result_revision_id"]
 
     current = projects.get_current_revision(document.project_id)
@@ -169,11 +171,11 @@ def test_http_turn_round_trips_a_durable_preview_annotation(
 
     assert accepted.status_code == 200
     assert accepted.json()["turn"]["workspace"]["preview_annotations"] == [
-        annotation
+        {**annotation, "spatial_region": None}
     ]
     conversation = client.get(
         f"/projects/{document.project_id}/conversations/{conversation_id}"
     ).json()
     assert conversation["messages"][0]["workspace"]["preview_annotations"] == [
-        annotation
+        {**annotation, "spatial_region": None}
     ]

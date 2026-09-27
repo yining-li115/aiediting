@@ -27,7 +27,7 @@ from aive.db.models import Asset, Base, Project, ProjectRevisionRow
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
 from aive.project.hashing import canonical_model_hash
-from aive.renderer.base import RenderResult
+from aive.rendering import RenderResult
 from aive.rendering.application import RevisionRenderApplication
 from aive.storage import LocalStorage
 

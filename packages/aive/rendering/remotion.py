@@ -25,10 +25,9 @@ from ..contracts.components import PublishedComponent
 from ..contracts.project_doc import ProjectDoc
 from ..contracts.time import FrameRange
 from ..contracts.timeline import CaptionTrack, GraphicTrack
-from ..renderer.base import RenderResult
-from ..renderer.ffmpeg import _run, probe, probe_duration
-from ..renderer.profiles import Quality
 from .ffmpeg import ProjectDocFFmpegRenderer, ProjectRenderUnsupported
+from .media import _run, probe, probe_duration
+from .provider import Quality, RenderResult
 
 
 @dataclass(frozen=True)

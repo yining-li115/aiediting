@@ -38,7 +38,12 @@ Status = Literal["frozen", "provisional", "challenger", "auxiliary", "excluded"]
 
 # Adapter = the client implementation that knows how to talk to this model.
 # Several models share one adapter; that is the point of the split.
-Adapter = Literal["mock", "passthrough", "openai_compatible", "local_openclip"]
+Adapter = Literal[
+    "openai_compatible",
+    "local_openclip",
+    "volcengine_embedding",
+    "volcengine_seed_asr",
+]
 
 
 @dataclass(frozen=True)
@@ -90,7 +95,7 @@ class ModelCard:
     unknowns: tuple[str, ...] = field(default_factory=tuple)
 
     def is_usable_offline(self) -> bool:
-        return self.adapter in ("mock", "passthrough", "local_openclip")
+        return self.adapter == "local_openclip"
 
     def resolved_model_id(self) -> str:
         """The id to send, taking an environment override into account."""
@@ -116,52 +121,6 @@ def _add(card: ModelCard) -> ModelCard:
     CATALOG[card.key] = card
     return card
 
-
-# --- offline / no-cost implementations ------------------------------------
-
-_add(
-    ModelCard(
-        key="mock",
-        vendor="local",
-        model_id="mock-v1",
-        adapter="mock",
-        roles=(
-            Role.MATERIAL,
-            Role.REFERENCE,
-            Role.INTENT,
-            Role.PLANNER,
-            Role.EMBEDDING,
-            Role.RERANK,
-            Role.AGENT_FAST,
-            Role.AGENT_DEEP,
-            Role.REVIEWER,
-            Role.ASR,
-        ),
-        status="provisional",
-        structured_output=True,
-        embedding_dim=512,
-        notes=(
-            "Deterministic offline stand-in. Same input always gives the same "
-            "output, so the skeleton is testable and ablations stay meaningful "
-            "before the stack is frozen."
-        ),
-    )
-)
-
-_add(
-    ModelCard(
-        key="passthrough",
-        vendor="local",
-        model_id="passthrough-v1",
-        adapter="passthrough",
-        roles=(Role.CRITIC,),
-        status="provisional",
-        notes=(
-            "Always reports a tie, so best-of-N degrades to 'take the first "
-            "candidate' without any caller special-casing a missing critic."
-        ),
-    )
-)
 
 _add(
     ModelCard(
@@ -189,7 +148,7 @@ _add(
         vendor="alibaba-bailian",
         model_id="qwen3.7-plus-2026-05-26",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.REFERENCE, Role.INTENT, Role.PLANNER),
+        roles=(Role.MATERIAL, Role.STYLE),
         status="provisional",
         accepts_video=True,
         accepts_images=True,
@@ -212,42 +171,18 @@ _add(
 
 _add(
     ModelCard(
-        key="seed2.0-lite",
-        vendor="bytedance-volcengine",
-        model_id="TBD-console-confirm",
-        adapter="openai_compatible",
-        roles=(
-            Role.MATERIAL,
-            Role.REFERENCE,
-            Role.INTENT,
-            Role.PLANNER,
-            Role.DIRECTOR,
-            Role.REVIEWER,
-        ),
-        status="challenger",
-        accepts_video=True,
-        reads_video_audio=True,
-        structured_output=False,
-        base_url_env="AIVE_ARK_BASE_URL",
-        api_key_env="AIVE_ARK_API_KEY",
-        notes="Mandatory challenger. Reads in-file audio, which Qwen3.7 does not.",
-        unknowns=("exact model_id on Ark", "video duration/size limits", "structured output support"),
-    )
-)
-
-_add(
-    ModelCard(
         key="gemini-3.7-flash",
         vendor="google",
         model_id="gemini-3.7-flash",
         adapter="openai_compatible",
         roles=(
             Role.MATERIAL,
-            Role.REFERENCE,
-            Role.INTENT,
-            Role.PLANNER,
-            Role.CRITIC,
+            Role.STYLE,
             Role.DIRECTOR,
+            Role.RERANK,
+            Role.REVIEWER,
+            Role.ASR,
+            Role.AUDIO,
         ),
         status="provisional",
         accepts_video=True,
@@ -287,6 +222,7 @@ _add(
         adapter="openai_compatible",
         roles=(Role.DIRECTOR,),
         status="challenger",
+        accepts_images=True,
         structured_output=False,
         context_tokens=1_000_000,
         requests_per_minute=10,
@@ -314,6 +250,7 @@ _add(
         adapter="openai_compatible",
         roles=(Role.DIRECTOR,),
         status="challenger",
+        accepts_images=True,
         structured_output=False,
         context_tokens=1_000_000,
         requests_per_minute=10,
@@ -337,6 +274,7 @@ _add(
         adapter="openai_compatible",
         roles=(Role.DIRECTOR,),
         status="challenger",
+        accepts_images=True,
         structured_output=False,
         context_tokens=1_000_000,
         requests_per_minute=10,
@@ -360,6 +298,7 @@ _add(
         adapter="openai_compatible",
         roles=(Role.DIRECTOR,),
         status="challenger",
+        accepts_images=True,
         structured_output=False,
         context_tokens=1_000_000,
         requests_per_minute=10,
@@ -384,7 +323,7 @@ _add(
         vendor="tencent",
         model_id="TBD-console-confirm",
         adapter="openai_compatible",
-        roles=(Role.MATERIAL, Role.REFERENCE),
+        roles=(Role.MATERIAL, Role.STYLE),
         status="challenger",
         accepts_video=True,
         reads_video_audio=True,
@@ -416,110 +355,86 @@ _add(
     )
 )
 
+# Volcengine Ark. Pro and Lite are separate cards even though they share one
+# project API key: every persisted model call must say which pinned model and
+# role actually made the decision.
+
 _add(
     ModelCard(
-        key="gpt-5.6-terra",
-        vendor="openai",
-        model_id="gpt-5.6-terra",
+        key="doubao-seed-2.1-pro",
+        vendor="bytedance-volcengine",
+        model_id="doubao-seed-2-1-pro-260915",
         adapter="openai_compatible",
-        roles=(Role.INTENT, Role.PLANNER, Role.AGENT_DEEP),
-        status="challenger",
+        roles=(Role.DIRECTOR, Role.REVIEWER),
+        status="provisional",
         accepts_images=True,
-        accepts_video=False,  # no raw video input: excluded from roles 1 and 2
+        accepts_video=True,
+        reads_video_audio=True,
         structured_output=True,
-        context_tokens=1_050_000,
-        base_url_env="AIVE_OPENAI_BASE_URL",
-        api_key_env="AIVE_OPENAI_API_KEY",
+        context_tokens=1_024_000,
+        base_url_env="AIVE_ARK_BASE_URL",
+        api_key_env="AIVE_ARK_API_KEY",
         notes=(
-            "Planner/agent challenger only. No raw video input, and self-serve "
-            "fine-tuning is winding down, so it cannot be the trainable critic."
+            "High-reasoning model for first cut, complex continuous edits, "
+            "AutoFix decisions, and creative render review. The card is not "
+            "frozen until a real investor-demo Golden Run passes."
         ),
     )
 )
 
-# Volcengine Ark. Two cards for one vendor, because the difference that
-# matters is not the model but whether the endpoint shares its traffic.
-#
-# The reward-plan endpoint buys free tokens with data authorisation. That is a
-# fair trade for our own test footage and a bad one for a user's holiday video,
-# so the two are separate cards and the split is enforced in code (see
-# check_data_policy below) rather than left to whoever is switching configs.
-
 _add(
     ModelCard(
-        key="doubao-vision-dev",
+        key="doubao-seed-2.1-lite",
         vendor="bytedance-volcengine",
-        # Filled from the console via AIVE_ARK_DEV_MODEL_ID: on Ark this is
-        # usually an endpoint id (ep-...) that exists only in one account.
-        model_id="TBD-set-AIVE_ARK_DEV_MODEL_ID",
-        model_id_env="AIVE_ARK_DEV_MODEL_ID",
+        model_id="doubao-seed-2-1-lite-260915",
         adapter="openai_compatible",
         roles=(
             Role.MATERIAL,
-            Role.REFERENCE,
-            Role.INTENT,
-            Role.PLANNER,
-            Role.DIRECTOR,
-            Role.REVIEWER,
+            Role.STYLE,
+            Role.RERANK,
+            Role.AUDIO,
         ),
-        status="challenger",
+        status="provisional",
         accepts_images=True,
         accepts_video=True,
+        reads_video_audio=True,
         structured_output=True,
-        base_url_env="AIVE_ARK_BASE_URL",
-        api_key_env="AIVE_ARK_API_KEY",
-        data_shared_with_vendor=True,
-        # Confirmed in the console: 30,000 requests and 5,000,000 tokens per
-        # minute. Neither binds - at ~2,900 tokens and ~23s per call, saturating
-        # the token limit would need roughly 670 concurrent requests. Recorded
-        # anyway so the limiter has a real number rather than an assumption,
-        # and so the next model's figures can be compared against something.
+        context_tokens=1_024_000,
         requests_per_minute=30_000,
-        notes=(
-            "Development endpoint enrolled in the Ark reward plan. For our own "
-            "test footage, synthetic data, bake-offs and prompt work only. "
-            "The binding budget is the reward plan's daily allowance, not the "
-            "per-minute limits: 2M tokens/day is about 14 projects of 50 "
-            "segments, so re-running a whole analysis to try a prompt change "
-            "is not free."
-        ),
-        unknowns=(
-            "whether the reward plan covers vision models at all",
-            "how long the free allowance lasts",
-            "whether the data authorisation covers uploaded images themselves",
-        ),
-    )
-)
-
-_add(
-    ModelCard(
-        key="doubao-vision",
-        vendor="bytedance-volcengine",
-        model_id="TBD-set-AIVE_ARK_MODEL_ID",
-        model_id_env="AIVE_ARK_MODEL_ID",
-        adapter="openai_compatible",
-        roles=(
-            Role.MATERIAL,
-            Role.REFERENCE,
-            Role.INTENT,
-            Role.PLANNER,
-            Role.DIRECTOR,
-            Role.REVIEWER,
-        ),
-        status="challenger",
-        accepts_images=True,
-        accepts_video=True,
-        structured_output=True,
         base_url_env="AIVE_ARK_BASE_URL",
         api_key_env="AIVE_ARK_API_KEY",
-        data_shared_with_vendor=False,
-        notes="Production endpoint. Must NOT be enrolled in the reward plan.",
-        unknowns=("exact endpoint id from the console",),
+        notes=(
+            "Lower-cost multimodal model for source understanding, Style "
+            "Blueprint extraction, raw-audio meaning, Moment grouping, and "
+            "semantic reranking."
+        ),
     )
 )
 
 
 # --- retrieval (role 4) ----------------------------------------------------
+
+_add(
+    ModelCard(
+        key="doubao-embedding-vision-251215",
+        vendor="bytedance-volcengine",
+        model_id="doubao-embedding-vision-251215",
+        adapter="volcengine_embedding",
+        roles=(Role.EMBEDDING,),
+        status="provisional",
+        accepts_images=True,
+        accepts_video=True,
+        context_tokens=128_000,
+        embedding_dim=2_048,
+        requests_per_minute=15_000,
+        base_url_env="AIVE_ARK_BASE_URL",
+        api_key_env="AIVE_ARK_API_KEY",
+        notes=(
+            "Pinned cross-modal recall model. Image corpus and text-query "
+            "instructions define one shared retrieval vector space."
+        ),
+    )
+)
 
 _add(
     ModelCard(
@@ -552,31 +467,26 @@ _add(
     )
 )
 
-# --- critic (role 5) -------------------------------------------------------
+# --- speech ----------------------------------------------------------------
 
 _add(
     ModelCard(
-        key="qwen3-vl-8b-instruct",
-        vendor="alibaba-bailian",
-        model_id="qwen3-vl-8b-instruct",
-        adapter="openai_compatible",
-        roles=(Role.CRITIC,),
-        status="challenger",
-        accepts_video=True,
-        accepts_images=True,
-        tunable=True,  # the only hard requirement that is specific to role 5
-        base_url_env="AIVE_BAILIAN_BASE_URL",
-        api_key_env="AIVE_BAILIAN_API_KEY",
+        key="seed-asr-2.0",
+        vendor="bytedance-volcengine",
+        model_id="volc.seedasr.auc",
+        adapter="volcengine_seed_asr",
+        roles=(Role.ASR,),
+        status="provisional",
+        reliable_timestamps=True,
+        base_url_env="AIVE_SEED_ASR_BASE_URL",
+        api_key_env="AIVE_SEED_ASR_API_KEY",
         notes=(
-            "Trainable taste-critic starting point. Role 5 is the only role "
-            "that requires tunability, so it may well end up on a different "
-            "model from roles 1 and 2."
+            "Recording-file recognition with utterance timestamps, speaker, "
+            "language, and emotion evidence. Uses a separate Doubao Voice key "
+            "and requires a short-lived remotely fetchable audio URL."
         ),
-        unknowns=("video sample upload limits for SFT",),
     )
 )
-
-# --- speech ----------------------------------------------------------------
 
 _add(
     ModelCard(
@@ -604,23 +514,19 @@ _add(
 # THIS IS THE LINE YOU EDIT TO SWAP A MODEL. The Director deliberately points
 # at a real model card: model-authored editing must fail visibly when its
 # credentials or output are invalid, never fall back to a local rule policy.
-# Other roles retain their explicit local fixtures until their production
-# vertical slices replace them.
+# Every creative role points at a real provider. Test fixtures are injected
+# from the test suite and are never registered as runtime fallbacks.
 # ---------------------------------------------------------------------------
 
 ACTIVE_STACK: dict[Role, str] = {
-    Role.MATERIAL: "gemini-3.7-flash",
-    Role.REFERENCE: "mock",
-    Role.INTENT: "gemini-3.7-flash",
-    Role.PLANNER: "gemini-3.7-flash",
-    Role.EMBEDDING: "mock",
-    Role.RERANK: "mock",
-    Role.CRITIC: "passthrough",
-    Role.AGENT_FAST: "mock",
-    Role.AGENT_DEEP: "mock",
-    Role.DIRECTOR: "gemini-3.6-flash",
-    Role.REVIEWER: "mock",
-    Role.ASR: "mock",
+    Role.MATERIAL: "doubao-seed-2.1-lite",
+    Role.STYLE: "doubao-seed-2.1-lite",
+    Role.EMBEDDING: "doubao-embedding-vision-251215",
+    Role.RERANK: "doubao-seed-2.1-lite",
+    Role.DIRECTOR: "doubao-seed-2.1-pro",
+    Role.REVIEWER: "doubao-seed-2.1-pro",
+    Role.ASR: "seed-asr-2.0",
+    Role.AUDIO: "doubao-seed-2.1-lite",
 }
 
 

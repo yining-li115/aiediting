@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env into the real process environment, not only into Settings.
@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # single operation.
     storage_backend: str = "local"
     storage_root: Path = Path("./data/storage")
+    tos_endpoint: str | None = None
+    tos_region: str | None = None
+    tos_bucket: str | None = None
+    tos_access_key_id: SecretStr | None = None
+    tos_secret_access_key: SecretStr | None = None
 
     media_root: Path = Path("./data/media")
     ffmpeg_bin: str = "ffmpeg"

@@ -13,6 +13,7 @@ from typing import Any, Callable
 from ..config import settings
 from .base import StoredFile, StorageProvider, sha256_of
 from .keys import (
+    ANALYSIS_AUDIO,
     EXPORT,
     KEYFRAME,
     MUSIC,
@@ -28,11 +29,45 @@ from .keys import (
     shared_key,
 )
 from .local import LocalStorage
+from .tos import TOSStorage
+
+
+def _secret_value(value: Any) -> str:
+    if value is None:
+        return ""
+    getter = getattr(value, "get_secret_value", None)
+    return getter() if getter is not None else str(value)
+
+
+def _tos_storage(**kwargs: Any) -> StorageProvider:
+    client = kwargs.pop("client", None)
+    bucket = kwargs.pop("bucket", settings.tos_bucket or "")
+    cache_root = Path(kwargs.pop("root", settings.storage_root))
+    signed_url_ttl_seconds = int(kwargs.pop("signed_url_ttl_seconds", 900))
+    if kwargs:
+        raise TypeError(f"unknown TOS storage options: {sorted(kwargs)}")
+    if client is not None:
+        return TOSStorage(
+            client=client,
+            bucket=bucket,
+            cache_root=cache_root,
+            signed_url_ttl_seconds=signed_url_ttl_seconds,
+        )
+    return TOSStorage.from_credentials(
+        access_key_id=_secret_value(settings.tos_access_key_id),
+        secret_access_key=_secret_value(settings.tos_secret_access_key),
+        endpoint=settings.tos_endpoint or "",
+        region=settings.tos_region or "",
+        bucket=bucket,
+        cache_root=cache_root,
+        signed_url_ttl_seconds=signed_url_ttl_seconds,
+    )
 
 # Backend registry. Adding object storage means implementing StorageProvider
 # and registering it here; nothing else changes.
 _BACKENDS: dict[str, Callable[..., StorageProvider]] = {
     "local": lambda **kw: LocalStorage(Path(kw.get("root", "data/storage"))),
+    "tos": _tos_storage,
 }
 
 _INSTANCE: StorageProvider | None = None
@@ -72,6 +107,7 @@ __all__ = [
     "StorageProvider",
     "StoredFile",
     "LocalStorage",
+    "TOSStorage",
     "get_storage",
     "set_storage",
     "register_backend",
@@ -84,6 +120,7 @@ __all__ = [
     "PROXY",
     "THUMBNAIL",
     "KEYFRAME",
+    "ANALYSIS_AUDIO",
     "MUSIC",
     "RENDER",
     "REFERENCE",

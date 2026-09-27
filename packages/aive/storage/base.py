@@ -91,4 +91,4 @@ class StorageProvider(Protocol):
     def iter_keys(self, prefix: str = "") -> Iterator[str]: ...
 
     def url(self, key: str) -> str | None:
-        """A URL a browser could fetch, when the backend can offer one."""
+        """A short-lived URL for one stored object, when supported."""

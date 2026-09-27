@@ -1,22 +1,21 @@
 @import "tailwindcss";
 
-/* TODO 硬编码: the palette, read off the design mock. Neutral greys plus one
-   indigo accent. Kept as tokens so a rebrand is this block rather than a
-   search across every component. */
+/* The product UI stays deliberately neutral: media and annotations carry the
+   colour while controls use a restrained black-and-white hierarchy. */
 @theme {
-  --color-canvas: #f6f6f7;
+  --color-canvas: #fafafa;
   --color-surface: #ffffff;
-  --color-line: #ececee;
-  --color-line-strong: #e2e2e6;
-  --color-ink: #16161a;
-  --color-ink-soft: #5f6068;
-  --color-ink-faint: #9a9aa3;
-  --color-accent: #6152e8;
-  --color-accent-hover: #5344d6;
-  --color-accent-soft: #ede9fe;
+  --color-line: #ededed;
+  --color-line-strong: #dedede;
+  --color-ink: #18181b;
+  --color-ink-soft: #52525b;
+  --color-ink-faint: #a1a1aa;
+  --color-accent: #18181b;
+  --color-accent-hover: #27272a;
+  --color-accent-soft: #f4f4f5;
 
-  --radius-card: 14px;
-  --radius-control: 10px;
+  --radius-card: 12px;
+  --radius-control: 8px;
 }
 
 html,
@@ -33,8 +32,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The mock is a light-only design. Committing to it explicitly beats
-   inheriting a half-working dark mode from the scaffold. */
 @media (prefers-color-scheme: dark) {
   body {
     background: var(--color-canvas);
@@ -42,7 +39,16 @@ body {
   }
 }
 
-/* Native selects keep their arrow otherwise, and the mock draws its own. */
 select {
   appearance: none;
+}
+
+::selection {
+  background: #e4e4e7;
+  color: #09090b;
+}
+
+* {
+  scrollbar-color: #d4d4d8 transparent;
+  scrollbar-width: thin;
 }

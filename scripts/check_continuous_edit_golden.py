@@ -77,7 +77,7 @@ from aive.project.capabilities import UnconfiguredCapabilityValidator  # noqa: E
 from aive.project.hashing import canonical_model_hash  # noqa: E402
 from aive.providers import Role, get_provider  # noqa: E402
 from aive.providers.base import CostRecord, set_cost_sink  # noqa: E402
-from aive.renderer.ffmpeg import probe_duration  # noqa: E402
+from aive.rendering import probe_duration  # noqa: E402
 from aive.rendering.application import RevisionRenderApplication  # noqa: E402
 from aive.rendering.ffmpeg import ProjectDocFFmpegRenderer  # noqa: E402
 from aive.storage import LocalStorage  # noqa: E402

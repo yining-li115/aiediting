@@ -8,7 +8,6 @@ dependencies = [
     "pydantic-settings>=2.2",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
-    "typer>=0.12",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
@@ -20,6 +19,8 @@ dependencies = [
     # Validate generated component parameter contracts before sandbox execution.
     "jsonschema>=4.23",
     "python-dotenv>=1.0",
+    # Private media storage and short-lived download signatures.
+    "tos>=2.9,<3",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,6 @@ material = [
     "opencv-python>=4.10",
     "scenedetect>=0.6.4",
     "pillow>=10.3",
-    "librosa>=0.10",
     "open-clip-torch>=2.24",
     "torch>=2.3",
 ]
@@ -37,9 +37,6 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
 ]
-
-[project.scripts]
-aive = "aive.cli:app"
 
 [build-system]
 requires = ["hatchling"]

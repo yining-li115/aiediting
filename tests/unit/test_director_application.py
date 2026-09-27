@@ -11,7 +11,8 @@ from aive.agent.harness import VideoAgentHarness
 from aive.agent.render_review import RenderReviewEngine
 from aive.agent.render_review_application import RenderReviewApplication
 from aive.agent.workflow import FirstCutWorkflow
-from aive.contracts.director import CreateFirstCutRequest, FirstCutDecision, MusicStrategy
+from aive.contracts.director import CreateFirstCutRequest
+from aive.contracts.moments import MediaSourceSpan
 from aive.contracts.patch import Patch, PatchScope
 from aive.contracts.patch_project import SetIntent
 from aive.contracts.project_doc import (
@@ -35,14 +36,22 @@ from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.models import Asset, Base, MomentRow, Project, ProjectRevisionRow
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.db.style_reference_repository import (
+    SqlAlchemyStyleReferenceBlueprintRepository,
+)
 from aive.jobs import JobRunner
 from aive.project.application import ProjectRevisionApplication
 from aive.project.capabilities import UnconfiguredCapabilityValidator
 from aive.project.hashing import canonical_model_hash
-from aive.renderer.base import RenderResult
+from aive.rendering import RenderResult
 from aive.rendering.application import RevisionRenderApplication
 from aive.storage import LocalStorage
-from tests.provider_fakes import FixtureFirstCutDirectorProvider
+from tests.provider_fakes import (
+    FixtureFirstCutDirectorProvider,
+    FixtureRenderReviewerProvider,
+    FixtureStyleUnderstandingProvider,
+)
+from tests.v2_fixtures import first_cut_decision, source_understanding
 
 
 NOW = datetime(2026, 9, 27, 0, 0, tzinfo=timezone.utc)
@@ -78,9 +87,6 @@ class FakeInspector:
                 has_video=True,
                 has_audio=False,
                 sampled_frame_count=5,
-                black_frame_ratio=0,
-                flat_frame_ratio=0,
-                mean_sharpness=0.8,
             ),
             (),
         )
@@ -145,20 +151,22 @@ class RepairingDirectorProvider:
     version = "1"
 
     async def create_first_cut(self, context):
-        return FirstCutDecision(
-            moment_ids=("invented_moment",),
+        return first_cut_decision(
+            moment_id="invented_moment",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Needs repair",
             explanation="Needs repair",
-            music_strategy=MusicStrategy(
-                mode="music_bed", asset_id="invented_music_asset"
-            ),
         )
 
     async def repair_first_cut(self, context, decision, review):
-        return FirstCutDecision(
-            moment_ids=("moment_director",),
+        return first_cut_decision(
+            moment_id="moment_director",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Reviewed first cut",
             explanation="Use the available opening.",
+            preserve_source_audio=False,
         )
 
 
@@ -175,18 +183,24 @@ class RenderAutoFixDirectorProvider(FixtureFirstCutDirectorProvider):
         self.render_repairs = 0
 
     async def create_first_cut(self, context):
-        return FirstCutDecision(
-            moment_ids=("moment_director",),
+        return first_cut_decision(
+            moment_id="moment_director",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Initial opening",
             explanation="Use the first opening.",
+            preserve_source_audio=False,
         )
 
     async def repair_rendered_first_cut(self, context, decision, review):
         self.render_repairs += 1
-        return FirstCutDecision(
-            moment_ids=("moment_alternative",),
+        return first_cut_decision(
+            moment_id="moment_alternative",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Stronger opening",
             explanation="Use the alternative opening.",
+            preserve_source_audio=False,
         )
 
 
@@ -196,7 +210,23 @@ class FailingRenderAutoFixDirectorProvider(RenderAutoFixDirectorProvider):
         raise RuntimeError("render AutoFix model unavailable")
 
 
-def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
+class CapturingStyleDirectorProvider(FixtureFirstCutDirectorProvider):
+    def __init__(self) -> None:
+        self.contexts = []
+
+    async def create_first_cut(self, context):
+        self.contexts.append(context)
+        return await super().create_first_cut(context)
+
+
+def _stack(
+    tmp_path,
+    provider=None,
+    inspector=None,
+    render_reviewer=None,
+    *,
+    with_style_reference=False,
+):
     engine = create_engine(f"sqlite:///{tmp_path / 'director-app.db'}", future=True)
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine, expire_on_commit=False, future=True)
@@ -209,7 +239,20 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
             target_duration_frames=60,
             prompt="Create a concise first cut",
         ),
-        assets=(AssetRef(asset_id="asset_director", kind="video"),),
+        assets=(
+            AssetRef(asset_id="asset_director", kind="video"),
+            *(
+                (
+                    AssetRef(
+                        asset_id="asset_style",
+                        kind="video",
+                        roles=("reference", "style_reference"),
+                    ),
+                )
+                if with_style_reference
+                else ()
+            ),
+        ),
         timeline=Timeline(
             duration_frames=60,
             output=OutputSettings(
@@ -226,6 +269,9 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
     original_key = "project_director/original/asset_director.mp4"
     storage.put_bytes(b"source", proxy_key)
     storage.put_bytes(b"source", original_key)
+    if with_style_reference:
+        storage.put_bytes(b"style", "project_director/proxy/asset_style.mp4")
+        storage.put_bytes(b"style", "project_director/original/asset_style.mp4")
     with sessions.begin() as session:
         session.add(Project(id=document.project_id, status="created"))
         session.add(
@@ -272,6 +318,12 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
                 timescale=1_000,
                 analysis_window_count=1,
                 keyframe_keys_json=[],
+                understanding_json=source_understanding(
+                    shot_ids=("shot_director",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="A clean opening shot",
+                    narrative_function="opening",
+                ).model_dump(mode="json"),
                 is_usable=True,
                 semantic_status="ready",
                 semantic="A clean opening shot",
@@ -281,6 +333,55 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
                 has_speech=False,
             )
         )
+        if with_style_reference:
+            session.add(
+                Asset(
+                    id="asset_style",
+                    project_id=document.project_id,
+                    storage_key="project_director/original/asset_style.mp4",
+                    proxy_key="project_director/proxy/asset_style.mp4",
+                    thumbnail_key="project_director/thumbnail/asset_style.jpg",
+                    readiness="ready",
+                    analysis_readiness="ready",
+                    kind="video",
+                    original_name="style.mp4",
+                    sha256="b" * 64,
+                    size_bytes=5,
+                    duration=2.0,
+                    width=1920,
+                    height=1080,
+                    fps=30.0,
+                    has_audio=True,
+                )
+            )
+            session.add(
+                MomentRow(
+                    id="moment_style_reference",
+                    project_id=document.project_id,
+                    asset_id="asset_style",
+                    ordinal=0,
+                    shot_ids_json=["shot_style_reference"],
+                    start_tick=0,
+                    end_tick=2_000,
+                    timescale=1_000,
+                    analysis_window_count=1,
+                    keyframe_keys_json=[],
+                    understanding_json=source_understanding(
+                        shot_ids=("shot_style_reference",),
+                        source=MediaSourceSpan(start=0, end=2_000),
+                        summary="Reference-only forest footage",
+                        narrative_function="opening",
+                    ).model_dump(mode="json"),
+                    is_usable=True,
+                    semantic_status="ready",
+                    semantic="Reference-only forest footage",
+                    semantic_role="opening",
+                    shot_type="wide",
+                    camera_motion="static",
+                    transcript_segment_ids_json=[],
+                    has_speech=False,
+                )
+            )
         session.add(
             MomentRow(
                 id="moment_alternative",
@@ -293,6 +394,12 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
                 timescale=1_000,
                 analysis_window_count=1,
                 keyframe_keys_json=[],
+                understanding_json=source_understanding(
+                    shot_ids=("shot_alternative",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="A stronger alternative opening",
+                    narrative_function="opening",
+                ).model_dump(mode="json"),
                 is_usable=True,
                 semantic_status="ready",
                 semantic="A stronger alternative opening",
@@ -334,7 +441,7 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
         provider=provider or FixtureFirstCutDirectorProvider(),
         render_review_engine=RenderReviewEngine(
             inspector=inspector or FakeInspector(),
-            provider=render_reviewer,
+            provider=render_reviewer or FixtureRenderReviewerProvider(),
         ),
     )
     director = DirectorApplication(
@@ -344,6 +451,9 @@ def _stack(tmp_path, provider=None, inspector=None, render_reviewer=None):
         assets=assets,
         rendering=rendering,
         harness=harness,
+        style_references=SqlAlchemyStyleReferenceBlueprintRepository(sessions),
+        style_understanding=FixtureStyleUnderstandingProvider(),
+        storage=storage,
         id_factory=lambda prefix: {
             "agent_run": "agent_run_first_cut",
             "job": "job_director_first_cut",
@@ -413,6 +523,39 @@ def test_director_commits_patch_and_queues_then_renders_preview(tmp_path) -> Non
     assert replay.replayed is True
     assert replay.run.run_id == ticket.run.run_id
     assert len(projects.list_revision_history("project_director")) == 1
+
+
+def test_style_reference_blueprint_reaches_director_without_media_leakage(
+    tmp_path,
+) -> None:
+    provider = CapturingStyleDirectorProvider()
+    director, _, _, _, jobs = _stack(
+        tmp_path,
+        provider=provider,
+        with_style_reference=True,
+    )
+    ticket = director.enqueue(
+        CreateFirstCutRequest(
+            request_id="request_style_first_cut",
+            project_id="project_director",
+            base_revision_id="revision_assets",
+            idempotency_key="style-first-cut-key",
+        )
+    )
+
+    assert asyncio.run(jobs.run(ticket.run.job_id, director.process)) is True
+    run = director.get_job_run(ticket.run.job_id)
+
+    assert run.status == "awaiting_review"
+    assert run.context is not None
+    assert len(run.context.style_reference_blueprints) == 1
+    assert run.context.style_reference_blueprints[0].asset_id == "asset_style"
+    assert {asset.asset_id for asset in run.context.assets} == {"asset_director"}
+    assert "moment_style_reference" not in {
+        moment.moment_id for moment in run.context.moments
+    }
+    assert provider.contexts == [run.context]
+    assert "moment_style_reference" not in set(run.decision.moment_ids)
 
 
 def test_provider_failure_leaves_current_revision_untouched(tmp_path) -> None:
@@ -776,7 +919,7 @@ def test_director_persists_context_review_and_bounded_repair(tmp_path) -> None:
     assert run.review is not None and run.review.accepted is True
     assert run.repair_attempts == 1
     assert run.decision is not None
-    assert "Selected 1 analyzed Moment" in run.decision.explanation
+    assert run.decision.explanation == "Use the available opening."
     assert projects.get_current_revision("project_director").document.revision_id == (
         "revision_first_cut"
     )

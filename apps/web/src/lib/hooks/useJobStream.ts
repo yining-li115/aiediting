@@ -43,24 +43,35 @@ const INITIAL: JobStreamState<never> = {
 };
 
 export function useJobStream<T = unknown>(jobId: string | null) {
-  const [state, setState] = useState<JobStreamState<T>>(
-    INITIAL as JobStreamState<T>,
-  );
+  const [snapshot, setSnapshot] = useState<{
+    jobId: string | null;
+    state: JobStreamState<T>;
+  }>({ jobId: null, state: INITIAL as JobStreamState<T> });
   const source = useRef<EventSource | null>(null);
+  const state =
+    snapshot.jobId === jobId
+      ? snapshot.state
+      : ({
+          ...(INITIAL as JobStreamState<T>),
+          status: jobId ? "connecting" : "idle",
+        } satisfies JobStreamState<T>);
 
   useEffect(() => {
-    if (!jobId) {
-      setState(INITIAL as JobStreamState<T>);
-      return;
-    }
+    if (!jobId) return;
 
-    setState({ ...(INITIAL as JobStreamState<T>), status: "connecting" });
     const es = new EventSource(`${API_BASE}/jobs/${jobId}/stream`);
     source.current = es;
 
     const record = (type: string) => (message: MessageEvent<string>) => {
       const data = JSON.parse(message.data) as JobEvent;
-      setState((previous) => {
+      setSnapshot((previousSnapshot) => {
+        const previous =
+          previousSnapshot.jobId === jobId
+            ? previousSnapshot.state
+            : ({
+                ...(INITIAL as JobStreamState<T>),
+                status: "connecting",
+              } satisfies JobStreamState<T>);
         const next: JobStreamState<T> = {
           ...previous,
           status: "running",
@@ -77,7 +88,7 @@ export function useJobStream<T = unknown>(jobId: string | null) {
           next.status = "failed";
           next.error = (data.error as string) ?? "the job failed";
         }
-        return next;
+        return { jobId, state: next };
       });
       if (type === "done" || type === "failed") es.close();
     };
@@ -90,6 +101,28 @@ export function useJobStream<T = unknown>(jobId: string | null) {
       "segment",
       "shot",
       "candidate",
+      "asset_ready",
+      "asset_failed",
+      "asset_analyzed",
+      "asset_analysis_failed",
+      "shot_detected",
+      "moment_analyzed",
+      "transcript_segment",
+      "style_reference_blueprint_ready",
+      "audio_assets_analyzed",
+      "director_context_ready",
+      "director_decision",
+      "first_cut_candidate_ready",
+      "render_ready",
+      "render_reviewed",
+      "render_autofix_candidate_ready",
+      "agent_turn_context_ready",
+      "agent_model_started",
+      "agent_tool_started",
+      "agent_tool_completed",
+      "preview_annotation_evidence_ready",
+      "agent_patch_applying",
+      "agent_turn_committed",
       "done",
       "failed",
     ]) {
@@ -101,11 +134,26 @@ export function useJobStream<T = unknown>(jobId: string | null) {
       // Last-Event-ID, so a dropped connection is not an error to show the
       // user. Only a closed stream is.
       if (es.readyState === EventSource.CLOSED) {
-        setState((previous) =>
-          previous.status === "succeeded" || previous.status === "failed"
-            ? previous
-            : { ...previous, status: "failed", error: "lost the connection" },
-        );
+        setSnapshot((previousSnapshot) => {
+          const previous =
+            previousSnapshot.jobId === jobId
+              ? previousSnapshot.state
+              : ({
+                  ...(INITIAL as JobStreamState<T>),
+                  status: "connecting",
+                } satisfies JobStreamState<T>);
+          return {
+            jobId,
+            state:
+              previous.status === "succeeded" || previous.status === "failed"
+                ? previous
+                : {
+                    ...previous,
+                    status: "failed",
+                    error: "lost the connection",
+                  },
+          };
+        });
       }
     };
 
@@ -117,8 +165,14 @@ export function useJobStream<T = unknown>(jobId: string | null) {
 
   const cancel = useCallback(() => {
     source.current?.close();
-    setState((previous) => ({ ...previous, status: "idle" }));
-  }, []);
+    setSnapshot((previous) => {
+      const current =
+        previous.jobId === jobId
+          ? previous.state
+          : (INITIAL as JobStreamState<T>);
+      return { jobId, state: { ...current, status: "idle" } };
+    });
+  }, [jobId]);
 
   return { ...state, cancel };
 }

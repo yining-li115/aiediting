@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from aive.agent.harness import VideoAgentHarness
-from aive.contracts.director import FirstCutDecision, MusicStrategy
 from aive.contracts.moments import MediaSourceSpan, MomentEvidence
 from aive.contracts.project_doc import (
     AssetRef,
@@ -19,6 +18,7 @@ from aive.contracts.revision import ProjectRevision, RevisionProvenance
 from aive.contracts.rendering import RenderReviewIssue, RenderReviewReport
 from aive.media.repository import AssetProcessingRecord
 from aive.project.hashing import canonical_model_hash
+from tests.v2_fixtures import first_cut_decision, source_understanding
 
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -32,27 +32,30 @@ class RepairingProvider:
         self.repairs = 0
 
     async def create_first_cut(self, context):
-        return FirstCutDecision(
-            moment_ids=("invented_moment",),
+        return first_cut_decision(
+            moment_id="invented_moment",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Invalid first proposal",
             explanation="Invalid first proposal",
-            music_strategy=MusicStrategy(
-                mode="music_bed", asset_id="invented_music_asset"
-            ),
         )
 
     async def repair_first_cut(self, context, decision, review):
         self.repairs += 1
-        return FirstCutDecision(
-            moment_ids=("moment_harness",),
+        return first_cut_decision(
+            moment_id="moment_harness",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Reviewed proposal",
             explanation="Use the available opening.",
         )
 
     async def repair_rendered_first_cut(self, context, decision, review):
         self.repairs += 1
-        return FirstCutDecision(
-            moment_ids=("moment_harness",),
+        return first_cut_decision(
+            moment_id="moment_harness",
+            source=MediaSourceSpan(start=0, end=2_000),
+            duration_frames=60,
             summary="Render-reviewed proposal",
             explanation="Strengthen the opening.",
         )
@@ -120,10 +123,11 @@ async def test_harness_owns_context_review_and_bounded_recovery() -> None:
                 source=MediaSourceSpan(start=0, end=2_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                technical_quality=0.9,
-                is_usable=True,
-                semantic_status="ready",
-                semantic="Opening shot",
+                understanding=source_understanding(
+                    shot_ids=("shot_harness",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="Opening shot",
+                ),
             ),
         ),
     )
@@ -135,7 +139,7 @@ async def test_harness_owns_context_review_and_bounded_recovery() -> None:
     assert context.base_revision_id == "revision_harness"
     assert outcome.review.accepted is True
     assert outcome.decision.moment_ids == ("moment_harness",)
-    assert "Selected 1 analyzed Moment" in outcome.decision.explanation
+    assert outcome.decision.explanation == "Use the available opening."
     assert outcome.repair_attempts == 1
     assert provider.repairs == 1
 
@@ -162,7 +166,7 @@ async def test_harness_builds_and_executes_bounded_render_autofix() -> None:
             ),
         ),
         moments=(
-            MomentEvidence(
+                MomentEvidence(
                 moment_id="moment_harness",
                 project_id="project_harness",
                 asset_id="asset_harness",
@@ -171,15 +175,18 @@ async def test_harness_builds_and_executes_bounded_render_autofix() -> None:
                 source=MediaSourceSpan(start=0, end=2_000),
                 analysis_window_count=1,
                 keyframe_count=1,
-                technical_quality=0.9,
-                is_usable=True,
-                semantic_status="ready",
-                semantic="Opening shot",
+                    understanding=source_understanding(
+                        shot_ids=("shot_harness",),
+                        source=MediaSourceSpan(start=0, end=2_000),
+                        summary="Opening shot",
+                    ),
             ),
         ),
     )
-    decision = FirstCutDecision(
-        moment_ids=("moment_harness",),
+    decision = first_cut_decision(
+        moment_id="moment_harness",
+        source=MediaSourceSpan(start=0, end=2_000),
+        duration_frames=60,
         summary="First candidate",
         explanation="Use the opening.",
     )
@@ -217,6 +224,6 @@ async def test_harness_builds_and_executes_bounded_render_autofix() -> None:
 
     assert outcome.review.accepted is True
     assert outcome.decision.moment_ids == ("moment_harness",)
-    assert "Selected 1 analyzed Moment" in outcome.decision.explanation
+    assert outcome.decision.explanation.startswith("Strengthen the opening.")
     assert provider.repairs == 1
     assert harness.can_autofix_render(report, attempts=1) is False

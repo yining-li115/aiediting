@@ -42,14 +42,18 @@ from aive.db.director_repository import SqlAlchemyDirectorRunRepository
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.db.style_reference_repository import (
+    SqlAlchemyStyleReferenceBlueprintRepository,
+)
 from aive.db.session import get_session_factory, init_db
 from aive.jobs import JobRunner, get_job
 from aive.media.analysis import MediaAnalysisApplication
+from aive.media.audio_asset_analysis import AudioAssetAnalysisApplication
 from aive.media.processing import MediaProcessingApplication
 from aive.providers.cost import install_db_cost_sink
 from aive.providers import get_provider
 from aive.roles import Role
-from aive.specs import TimelineSpec, validate_timeline
+from aive.rendering.annotations import OpenCVPreviewAnnotationEvidenceExtractor
 from aive.storage import get_storage
 
 
@@ -68,11 +72,14 @@ async def lifespan(_: FastAPI):
         repository=SqlAlchemyMediaAnalysisRepository(sessions),
     )
     rendering = get_revision_render_application()
+    reviewer = get_provider(Role.REVIEWER)
     harness = VideoAgentHarness(
         provider=get_provider(Role.DIRECTOR),
+        moment_search_provider=get_provider(Role.RERANK),
+        creative_reviewer=reviewer,
         component_tools=get_component_application(),
         render_review_engine=RenderReviewEngine(
-            provider=get_provider(Role.REVIEWER),
+            provider=reviewer,
         ),
     )
     director = DirectorApplication(
@@ -82,6 +89,14 @@ async def lifespan(_: FastAPI):
         assets=SqlAlchemyMediaAssetRepository(sessions),
         rendering=rendering,
         harness=harness,
+        style_references=SqlAlchemyStyleReferenceBlueprintRepository(sessions),
+        style_understanding=get_provider(Role.STYLE),
+        storage=get_storage(),
+        audio_assets=AudioAssetAnalysisApplication(
+            storage=get_storage(),
+            assets=SqlAlchemyMediaAssetRepository(sessions),
+            provider=get_provider(Role.AUDIO),
+        ),
     )
     reviewing = RenderReviewApplication(
         revisions=SqlAlchemyRevisionRepository(sessions),
@@ -108,6 +123,12 @@ async def lifespan(_: FastAPI):
         rendering=rendering,
         harness=harness,
         assets=SqlAlchemyMediaAssetRepository(sessions),
+        audio_assets=AudioAssetAnalysisApplication(
+            storage=get_storage(),
+            assets=SqlAlchemyMediaAssetRepository(sessions),
+            provider=get_provider(Role.AUDIO),
+        ),
+        annotation_evidence=OpenCVPreviewAnnotationEvidenceExtractor(),
     )
     conversation_workflow = ConversationWorkflow(
         jobs=jobs,
@@ -212,17 +233,6 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "media_root": str(settings.media_root)}
-
-
-@app.post("/validate")
-def validate(timeline: dict) -> dict:
-    """Compatibility validation for the legacy TimelineSpec API."""
-    spec = TimelineSpec.model_validate(timeline)
-    violations = validate_timeline(spec)
-    return {
-        "ok": not any(v.severity == "hard" for v in violations),
-        "violations": [v.model_dump() for v in violations],
-    }
 
 
 @app.get("/jobs/{job_id}/stream")

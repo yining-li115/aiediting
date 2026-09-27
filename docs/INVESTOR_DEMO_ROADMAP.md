@@ -15,8 +15,8 @@ every stage testable and reusable.
 
 The final demonstration should show one continuous project:
 
-1. Choose Autonomous Edit or Reference Remake.
-2. Upload original videos/photos and optionally one reference video.
+1. Start an Autonomous Edit and optionally attach Style References.
+2. Upload original videos/photos, optional Style Reference videos, and licensed music.
 3. Watch meaningful processing progress: ingest, understanding, planning,
    matching, preview, and review.
 4. Receive a coherent first cut with real video and audio.
@@ -24,8 +24,8 @@ The final demonstration should show one continuous project:
 6. Lock an accepted section and make one manual edit.
 7. Ask the Agent to continue editing without damaging locked or manual work.
 8. Compare versions and undo or restore.
-9. In reference mode, inspect how reference sections map to the new result and
-   where the system adapted because footage was missing.
+9. Inspect which transferable pace and editing grammar the Agent learned from
+   Style References without reusing their footage.
 10. Export a final playable video from the committed revision.
 
 This is the product narrative. Implementation milestones below are delivery
@@ -38,7 +38,7 @@ The investor demo is complete only when it has:
 - a polished Web workspace, not a CLI-only path;
 - real upload, analysis, generation, preview, iterative editing, versioning,
   and export;
-- both autonomous and reference-remake modes;
+- autonomous editing with optional, non-content Style References;
 - a visible explanation of progress and meaningful limitations;
 - at least one real model-backed media observation path;
 - deterministic fixtures and a rehearsed golden project for reliability;
@@ -113,8 +113,11 @@ The browser exposes progress, explanation, and the Reviewer summary. Failed
 providers, exhausted repairs, render failures, and final review rejection preserve
 the previous revision. The first cut now turns Moment ASR into a versioned
 `caption.clean` track, selects an explicitly authorized music Asset, applies
-gain/fades/speech ducking, and renders both layers in the revision-bound
-preview/export path. A production-model golden run for this new layer,
+gain/fades/speech ducking, places authorized SFX from Moment evidence, and may
+align real cut/transition boundaries to measured audio events. Uploaded audio
+meaning and signal facts are frozen into AgentRunContext before the model
+decision; render review consumes the real audiovisual proxy. All layers render
+in the revision-bound preview/export path. A production-model golden run for this layer,
 animated typography, catalog-backed licensing, and effect-aware repair beyond
 the first-cut subset remain.
 
@@ -157,8 +160,11 @@ full timeline workspace. A user can attach an exact frame/range and comment
 from a ready current-Revision preview to the left conversation. The durable
 WorkspaceSelection and AgentTurnContext keep that quote bound to its Revision
 and Artifact, deterministic grounding maps it to timeline IDs, and every
-resulting change still goes through typed Patch and ProjectService. Spatial
-regions remain a later extension.
+resulting change still goes through typed Patch and ProjectService. Preview
+edit also supports a normalized letterbox-safe rectangle. The Job extracts an
+outlined frame from the exact preview Artifact and supplies it to the
+image-capable Director; unsupported model input or extraction failure is
+surfaced rather than silently degrading to text-only inference.
 
 Caption and audio Patch operations are now admitted by the bounded tool loop:
 the Director can add a complete caption or authorized audio track, edit cue
@@ -176,7 +182,22 @@ Deliver:
 Exit condition: the full generate/edit/lock/manual-edit/agent-edit/undo/export
 scenario passes as an end-to-end test.
 
-### Stage 5 - Reference remake
+### Stage 5 - Style Reference
+
+Style Reference is part of Autonomous Edit. It uses the same upload and media
+analysis pipeline, derives immutable content-addressed grammar Blueprints,
+freezes them into AgentRunContext, and never exposes reference media as a
+selectable source. See `STYLE_REFERENCE_V1.md`.
+
+Exit condition: an uploaded Style Reference changes the Director's declared
+and reviewed pacing/grammar, survives retry and recovery, and cannot place its
+pixels, audio, transcript, or Moments in the output.
+
+### Extension - Reference remake
+
+Reference Remake is intentionally deferred until after the Preview-only
+investor demo. Its UI entry must remain disabled until this whole vertical path
+exists.
 
 Deliver:
 
@@ -186,9 +207,9 @@ Deliver:
 - adaptation decisions and reference-aware review;
 - reference/output comparison in the Web workspace.
 
-Exit condition: the same footage can be edited autonomously or against a
-reference, missing footage is explained, and localized reference feedback
-updates only the mapped output range.
+Exit condition: the same footage can be edited against a shot-level reference,
+missing footage is explained, and localized reference feedback updates only
+the mapped output range.
 
 ### Stage 6 - Remotion and presentation quality
 

@@ -39,6 +39,15 @@ def test_create_project_request_is_a_closed_versioned_contract() -> None:
         CreateProjectRequest.model_validate(invalid)
 
 
+def test_create_project_accepts_a_long_form_target_duration() -> None:
+    long_form = _payload()
+    long_form["intent"]["target_duration_frames"] = 30 * 60 * 20
+
+    request = CreateProjectRequest.model_validate(long_form)
+
+    assert request.intent.target_duration_frames == 36_000
+
+
 def test_create_project_rejects_an_id_that_cannot_fit_the_project_table() -> None:
     invalid = _payload()
     invalid["project_id"] = "p" * 65

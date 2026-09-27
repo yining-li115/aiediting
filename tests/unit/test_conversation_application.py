@@ -12,6 +12,7 @@ from aive.agent.conversation_application import (
 )
 from aive.agent.conversation_workflow import ConversationWorkflow
 from aive.agent.harness import VideoAgentHarness
+from aive.agent.preview_evidence import PreviewAnnotationImage
 from aive.contracts.conversation import (
     AgentStepDecision,
     CreateAgentTurnRequest,
@@ -20,6 +21,7 @@ from aive.contracts.conversation import (
     MomentSearchQuery,
     PatchProposal,
     PreviewAnnotation,
+    PreviewSpatialRegion,
     ProposePatchCall,
     ReadProjectCall,
     SearchMomentsCall,
@@ -30,6 +32,7 @@ from aive.contracts.patch_project import (
     AddTrack,
     SetDependencies,
     SetIntent,
+    SetOutputSettings,
     SetTimelineDuration,
 )
 from aive.contracts.patch_timeline import (
@@ -66,6 +69,7 @@ from aive.contracts.project_doc import (
     VideoTrack,
 )
 from aive.contracts.captions import default_caption_style
+from aive.contracts.moments import MediaSourceSpan
 from aive.contracts.rendering import CreateRenderRequest
 from aive.contracts.timeline import CropRect, ReframeSpec
 from aive.db.analysis_repository import SqlAlchemyMediaAnalysisRepository
@@ -74,14 +78,17 @@ from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.models import Asset, Base, MomentRow, Project, ProjectRevisionRow
 from aive.db.project_repository import SqlAlchemyRevisionRepository
 from aive.db.render_repository import SqlAlchemyRenderRepository
+from aive.events import bus
 from aive.jobs import JobRunner
 from aive.project.application import ProjectRevisionApplication
 from aive.project.capabilities import DefaultCapabilityValidator
 from aive.project.hashing import canonical_model_hash
-from aive.renderer.base import RenderResult
+from aive.rendering import RenderResult
 from aive.rendering.application import RevisionRenderApplication
 from aive.rendering.ffmpeg import ProjectDocFFmpegRenderer
 from aive.storage import LocalStorage
+from tests.provider_fakes import FixtureRerankProvider
+from tests.v2_fixtures import source_understanding
 
 
 NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
@@ -111,8 +118,14 @@ class ScriptedEditProvider:
 
     def __init__(self, proposal: PatchProposal) -> None:
         self._proposal = proposal
+        self.annotation_images: tuple[PreviewAnnotationImage, ...] = ()
+        self.annotation_image_paths_existed = False
 
-    async def next_edit_step(self, context, steps):
+    async def next_edit_step(self, context, steps, *, annotation_images=()):
+        self.annotation_images = annotation_images
+        self.annotation_image_paths_existed = bool(annotation_images) and all(
+            image.path.exists() for image in annotation_images
+        )
         if not steps:
             return AgentStepDecision(
                 kind="tool_call",
@@ -170,7 +183,38 @@ class InvalidOutputEditProvider:
         )
 
 
-def _stack(tmp_path, *, provider):
+class FakePreviewAnnotationEvidenceExtractor:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def extract(
+        self,
+        annotation,
+        *,
+        media_path,
+        artifact_start_frame,
+        output_path,
+    ):
+        self.calls.append(
+            {
+                "annotation": annotation,
+                "media_path": media_path,
+                "artifact_start_frame": artifact_start_frame,
+            }
+        )
+        output_path.write_bytes(b"spatial-annotation-evidence")
+        evidence_frame = (
+            annotation.output_range.start_frame
+            + (annotation.output_range.duration_frames - 1) // 2
+        )
+        return PreviewAnnotationImage(
+            annotation_id=annotation.annotation_id,
+            evidence_frame=evidence_frame,
+            path=output_path,
+        )
+
+
+def _stack(tmp_path, *, provider, annotation_evidence=None):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'conversation-app.db'}",
         future=True,
@@ -359,6 +403,12 @@ def _stack(tmp_path, *, provider):
                 is_usable=True,
                 transcript_segment_ids_json=[],
                 has_speech=False,
+                understanding_json=source_understanding(
+                    shot_ids=("shot_source",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="Travel opening",
+                    narrative_function="Open the sequence",
+                ).model_dump(mode="json"),
                 analyzed_at=NOW,
             )
         )
@@ -384,6 +434,12 @@ def _stack(tmp_path, *, provider):
                 is_usable=True,
                 transcript_segment_ids_json=[],
                 has_speech=False,
+                understanding_json=source_understanding(
+                    shot_ids=("shot_replacement",),
+                    source=MediaSourceSpan(start=0, end=2_000),
+                    summary="Bright replacement close-up",
+                    narrative_function="Develop the sequence",
+                ).model_dump(mode="json"),
                 analyzed_at=NOW,
             )
         )
@@ -410,8 +466,12 @@ def _stack(tmp_path, *, provider):
         projects=projects,
         analysis=SqlAlchemyMediaAnalysisRepository(sessions),
         rendering=rendering,
-        harness=VideoAgentHarness(provider=provider),
+        harness=VideoAgentHarness(
+            provider=provider,
+            moment_search_provider=FixtureRerankProvider(),
+        ),
         assets=SqlAlchemyMediaAssetRepository(sessions),
+        annotation_evidence=annotation_evidence,
     )
     jobs = JobRunner(sessions)
     workflow = ConversationWorkflow(
@@ -449,6 +509,24 @@ def _lower_first_audio_proposal() -> PatchProposal:
                 operation_id="operation_lower_audio_1",
                 clip_id="clip_audio_1",
                 gain_db=-6,
+            ),
+        ),
+    )
+
+
+def _portrait_output_proposal() -> PatchProposal:
+    return PatchProposal(
+        summary="将成片调整为竖屏比例",
+        rationale="输出画布改为 9:16，并保留现有帧率、音频采样率和色彩空间。",
+        scope=PatchScope(kind="global"),
+        operations=(
+            SetOutputSettings(
+                operation_id="operation_portrait_output",
+                output=OutputSettings(
+                    width=108,
+                    height=192,
+                    fps=Rational(num=30, den=1),
+                ),
             ),
         ),
     )
@@ -534,6 +612,68 @@ async def test_preview_annotation_is_frozen_into_agent_turn_context(tmp_path) ->
     assert completed is not None
     assert completed.context is not None
     assert completed.context.workspace.preview_annotations == (annotation,)
+
+
+async def test_spatial_preview_annotation_reaches_director_as_visual_evidence(
+    tmp_path,
+) -> None:
+    provider = ScriptedEditProvider(_lower_first_audio_proposal())
+    evidence = FakePreviewAnnotationEvidenceExtractor()
+    application, workflow, _, _, document = _stack(
+        tmp_path,
+        provider=provider,
+        annotation_evidence=evidence,
+    )
+    artifact = await _ready_preview(application, document)
+    conversation = application.create_conversation(
+        CreateConversationRequest(
+            request_id="request_spatial_annotation_conversation",
+            project_id=document.project_id,
+        )
+    ).conversation
+    annotation = PreviewAnnotation(
+        annotation_id="annotation_spatial_title",
+        revision_id=document.revision_id,
+        artifact_id=artifact.artifact_id,
+        output_range=FrameRange(start_frame=10, duration_frames=5),
+        spatial_region=PreviewSpatialRegion(
+            x=0.2,
+            y=0.1,
+            width=0.5,
+            height=0.25,
+        ),
+        comment="把框里的标题上移。",
+    )
+    ticket = application.enqueue_turn(
+        CreateAgentTurnRequest(
+            request_id="request_spatial_annotation",
+            project_id=document.project_id,
+            conversation_id=conversation.conversation_id,
+            base_revision_id=document.revision_id,
+            idempotency_key="turn_spatial_annotation",
+            instruction="按我的画面标记调整。",
+            workspace=WorkspaceSelection(
+                revision_id=document.revision_id,
+                preview_annotations=(annotation,),
+            ),
+        )
+    )
+
+    await workflow.run(ticket.turn.job_id)
+
+    completed = application.get_turn(document.project_id, ticket.turn.turn_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.context is not None
+    assert completed.context.workspace.preview_annotations == (annotation,)
+    assert len(evidence.calls) == 1
+    assert evidence.calls[0]["media_path"].exists()
+    assert evidence.calls[0]["artifact_start_frame"] == 0
+    assert provider.annotation_image_paths_existed is True
+    assert [image.annotation_id for image in provider.annotation_images] == [
+        annotation.annotation_id
+    ]
+    assert provider.annotation_images[0].evidence_frame == 12
 
 
 async def test_preview_annotation_cannot_escape_the_rendered_range(tmp_path) -> None:
@@ -1108,8 +1248,91 @@ async def test_continuous_edit_commits_patch_explains_and_renders(tmp_path) -> N
     assert audio_track.clips[0].gain_db == -6
     assert completed.render_job_id is not None
     assert chat is not None
-    assert "ProjectService" in chat.messages[-1].content
+    assert "ProjectService" not in chat.messages[-1].content
+    assert current.document.revision_id not in chat.messages[-1].content
+    assert "调整音量" in chat.messages[-1].content
     assert chat.messages[-1].result_revision_id == current.document.revision_id
+
+    events = bus.replay(ticket.turn.job_id)
+    activity_types = [
+        event.type
+        for event in events
+        if event.type.startswith("agent_")
+    ]
+    assert activity_types == [
+        "agent_turn_context_ready",
+        "agent_model_started",
+        "agent_tool_started",
+        "agent_tool_completed",
+        "agent_model_started",
+        "agent_tool_started",
+        "agent_tool_completed",
+        "agent_patch_applying",
+        "agent_turn_committed",
+    ]
+    tool_events = [
+        event
+        for event in events
+        if event.type in {"agent_tool_started", "agent_tool_completed"}
+    ]
+    assert [event.data["tool"] for event in tool_events] == [
+        "read_project",
+        "read_project",
+        "propose_patch",
+        "propose_patch",
+    ]
+    assert tool_events[1].data == {
+        "turn_id": ticket.turn.turn_id,
+        "step_index": 0,
+        "tool": "read_project",
+        "track_count": 2,
+        "duration_frames": 60,
+        "failed": False,
+    }
+    assert tool_events[2].data["summary"] == "Lower the first source-audio clip"
+    assert tool_events[2].data["operation_types"] == ["set_audio_gain"]
+    assert tool_events[3].data["operation_count"] == 1
+    assert tool_events[3].data["failed"] is False
+
+
+async def test_continuous_edit_changes_output_canvas_before_rendering(tmp_path) -> None:
+    application, workflow, projects, repository, document = _stack(
+        tmp_path,
+        provider=ScriptedEditProvider(_portrait_output_proposal()),
+    )
+    conversation = application.create_conversation(
+        CreateConversationRequest(
+            request_id="request_portrait_conversation",
+            project_id=document.project_id,
+        )
+    ).conversation
+    ticket = application.enqueue_turn(
+        CreateAgentTurnRequest(
+            request_id="request_portrait_turn",
+            project_id=document.project_id,
+            conversation_id=conversation.conversation_id,
+            base_revision_id=document.revision_id,
+            idempotency_key="turn_portrait_output",
+            instruction="把视频改成竖屏",
+            workspace=WorkspaceSelection(revision_id=document.revision_id),
+        )
+    )
+
+    await workflow.run(ticket.turn.job_id)
+
+    completed = application.get_turn(document.project_id, ticket.turn.turn_id)
+    current = projects.get_current_revision(document.project_id)
+    chat = repository.get(document.project_id, conversation.conversation_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert current.document.parent_revision_id == document.revision_id
+    assert current.document.timeline.output.width == 108
+    assert current.document.timeline.output.height == 192
+    assert current.document.timeline.output.fps == document.timeline.output.fps
+    assert completed.render_job_id is not None
+    assert chat is not None
+    assert "竖屏" in chat.messages[-1].content
+    assert "调整输出画布" in chat.messages[-1].content
 
 
 async def test_model_output_error_is_persisted_for_the_frontend_without_editing(

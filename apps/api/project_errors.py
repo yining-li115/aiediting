@@ -48,8 +48,8 @@ from aive.project.repository import (
     RevisionIdentityConflict,
 )
 from aive.project.service import ProjectServiceError
-from aive.renderer import FFmpegError
 from aive.rendering import (
+    FFmpegError,
     RenderArtifactNotFound,
     RenderAssetUnavailable,
     RenderIdempotencyConflict,

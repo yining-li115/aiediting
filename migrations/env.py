@@ -18,7 +18,11 @@ config = context.config
 config.set_main_option("sqlalchemy.url", settings.db_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # The API runs migrations inside Uvicorn's lifespan. Alembic's default
+    # ``disable_existing_loggers=True`` silences Uvicorn after the migration,
+    # hiding both "startup complete" and request logs even though the server
+    # is healthy. Keep the host application's loggers intact.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

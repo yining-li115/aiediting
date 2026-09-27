@@ -65,6 +65,20 @@ If those answers are unclear, inspect the repository before adding files.
   candidate from the still-current committed base. Never mutate, relabel, or
   temporarily commit the rejected candidate, and enforce the attempt limit in
   code rather than in a prompt.
+- Define model-facing grammar as versioned contracts. Content, emotion,
+  rhythm, narrative, style, composition, music suitability, and creative
+  quality values must come from a provider response with evidence and
+  provenance, not from application thresholds, keyword maps, or weighted
+  heuristic scores.
+- Deterministic measurements are evidence, not editorial verdicts. They may
+  reject corrupt, undecodable, unauthorized, out-of-range, or structurally
+  invalid inputs; they may not reject or rank valid media merely because a
+  hand-written aesthetic formula considers it blurry, dark, slow, repetitive,
+  or insufficiently interesting.
+- Required model failure is a typed, user-visible failure. Do not turn missing
+  or invalid model output into singleton semantic Moments, generic style
+  labels, mock embeddings, passthrough creative approval, or another result
+  that appears model-authored.
 
 ## Scope rules
 

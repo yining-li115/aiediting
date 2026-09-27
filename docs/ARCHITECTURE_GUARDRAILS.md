@@ -135,6 +135,38 @@ boundary. The Harness owns model context, provider invocation, workflow-local
 review, and bounded recovery; it never owns ProjectDoc persistence, Patch
 commit, rendering, SQL, or HTTP orchestration.
 
+### 6.1 Model-owned understanding and creative judgment
+
+Code defines contracts, evidence boundaries, permissions, and executable
+capabilities. It must not imitate media understanding or editorial taste with
+keyword tables, hand-tuned category thresholds, weighted aesthetic scores, or
+fixed creative fallbacks.
+
+Deterministic code may produce and validate facts such as decode status,
+duration, dimensions, exact time ranges, sample identities, audio presence,
+revision identity, authorization, and renderer capability. Specialized signal
+extractors may expose measurements such as candidate boundaries, luminance,
+onsets, or motion vectors, but those measurements are evidence rather than an
+editorial conclusion.
+
+Provider-backed models own conclusions involving content, meaning, emotion,
+rhythm, narrative, composition, camera language, style, music suitability,
+caption design, creative quality, and what footage is worth using. Their
+answers use closed versioned output structures with evidence citations,
+confidence, uncertainty, and provider provenance. The schema constrains how a
+model answers; it does not hard-code what the answer must be.
+
+Controlled vocabularies are appropriate for executable system capabilities
+such as Patch operation types, Asset roles, Job states, renderer definitions,
+and commit states. Creative vocabulary must remain expressive: optional
+normalized tags may support retrieval, but they cannot replace the model's
+description and evidence.
+
+If a required understanding or creative-review provider is unavailable or
+returns invalid output, the Job fails visibly. The runtime may retain raw
+evidence for retry, but it must not manufacture an understood Moment, Style
+Blueprint, edit decision, or accepted review through an offline rule fallback.
+
 For the local demo these may run in one machine and may initially use an
 in-process dispatcher. Their contracts must already carry project, revision,
 request, and job identity so they can later move to durable workers without

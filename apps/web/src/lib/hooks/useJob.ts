@@ -87,6 +87,8 @@ export const STAGE_LABELS: Record<JobStage, string> = {
   generating_thumbnail: "Creating thumbnails",
   rendering_proxy: "Rendering previews",
   rendering_hq: "Rendering the final cut",
+  reviewing: "Reviewing the rendered result",
+  autofixing: "Repairing a review issue",
   done: "Done",
   failed: "Failed",
 };

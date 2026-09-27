@@ -11,14 +11,12 @@ from .base import (
 from .registry import available_adapters, get_provider, register_adapter
 from .roles import (
     ASRProvider,
-    EditingAgentProvider,
+    AudioUnderstandingProvider,
     EmbeddingProvider,
     MaterialUnderstandingProvider,
     MomentGroupingProvider,
-    PlannerProvider,
-    ReferenceUnderstandingProvider,
     RerankProvider,
-    TasteCriticProvider,
+    StyleUnderstandingProvider,
 )
 
 __all__ = [
@@ -33,11 +31,9 @@ __all__ = [
     "available_adapters",
     "MaterialUnderstandingProvider",
     "MomentGroupingProvider",
-    "ReferenceUnderstandingProvider",
-    "PlannerProvider",
     "EmbeddingProvider",
     "RerankProvider",
-    "TasteCriticProvider",
-    "EditingAgentProvider",
+    "StyleUnderstandingProvider",
     "ASRProvider",
+    "AudioUnderstandingProvider",
 ]

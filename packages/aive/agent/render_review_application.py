@@ -11,7 +11,7 @@ from ..contracts.rendering import RenderArtifact, RenderReviewTicket
 from ..jobs import Stage
 from ..project.repository import RevisionRepository
 from ..rendering.repository import RenderArtifactNotFound, RenderRepository
-from ..specs.base import new_id
+from ..ids import new_id
 from ..storage import StorageProvider
 from .harness import VideoAgentHarness
 

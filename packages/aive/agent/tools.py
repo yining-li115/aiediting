@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import json
 from collections.abc import Callable
 from typing import Protocol
 
@@ -44,6 +44,7 @@ from ..contracts.timeline import (
     VideoClip,
     VideoTrack,
 )
+from ..providers.roles import RerankProvider
 
 
 class MomentToolError(ValueError):
@@ -53,65 +54,56 @@ class MomentToolError(ValueError):
 class DirectorMomentTools:
     """Search and inspect only the immutable evidence supplied to this run."""
 
-    def __init__(self, context: AgentRunContext | AgentTurnContext) -> None:
+    def __init__(
+        self,
+        context: AgentRunContext | AgentTurnContext,
+        *,
+        search_provider: RerankProvider,
+    ) -> None:
         self._moments = {moment.moment_id: moment for moment in context.moments}
+        self._search_provider = search_provider
 
-    def search_moments(
+    async def search_moments(
         self,
         query: MomentSearchQuery,
     ) -> tuple[MomentSearchHit, ...]:
-        query_tokens = _tokens(query.text or "")
-        roles = {role.casefold() for role in query.semantic_roles}
-        hits: list[tuple[MomentSearchHit, int, int]] = []
-        for order, moment in enumerate(self._moments.values()):
+        candidates: list[MomentEvidence] = []
+        for moment in self._moments.values():
             if query.usable_only and not moment.is_usable:
                 continue
             if query.require_speech is not None and moment.has_speech != query.require_speech:
                 continue
-            if roles and moment.semantic_role.casefold() not in roles:
-                continue
-            quality = moment.technical_quality
-            if query.minimum_quality is not None and (
-                quality is None or quality < query.minimum_quality
-            ):
-                continue
-
-            searchable = " ".join(
-                part
-                for part in (
-                    moment.semantic,
-                    moment.semantic_role,
-                    moment.shot_type,
-                    moment.asr_text,
-                    " ".join(moment.emotion),
-                )
-                if part
+            candidates.append(moment)
+        if not candidates:
+            return ()
+        payloads = [
+            json.dumps(
+                {
+                    "moment_id": moment.moment_id,
+                    "understanding": moment.understanding.model_dump(mode="json"),
+                    "has_speech": moment.has_speech,
+                    "transcript": moment.asr_text,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
-            overlap = len(query_tokens & _tokens(searchable))
-            score = float(overlap * 10)
-            reasons: list[str] = []
-            if overlap:
-                reasons.append("text_match")
-            if quality is not None:
-                score += quality
-                reasons.append("technical_quality")
-            if moment.interestingness is not None:
-                score += moment.interestingness
-                reasons.append("interestingness")
-            hits.append(
-                (
-                    MomentSearchHit(
-                        moment_id=moment.moment_id,
-                        score=score,
-                        reasons=tuple(reasons),
-                    ),
-                    overlap,
-                    order,
-                )
+            for moment in candidates
+        ]
+        scores = await self._search_provider.rerank(query.text, payloads)
+        if len(scores) != len(candidates):
+            raise MomentToolError(
+                "Moment search provider returned the wrong number of scores"
             )
-
-        hits.sort(key=lambda item: (-item[1], -item[0].score, item[2]))
-        return tuple(item[0] for item in hits[: query.limit])
+        hits = [
+            MomentSearchHit(
+                moment_id=moment.moment_id,
+                score=score,
+                reasons=("model_semantic_match",),
+            )
+            for moment, score in zip(candidates, scores, strict=True)
+        ]
+        hits.sort(key=lambda hit: (-hit.score, hit.moment_id))
+        return tuple(hits[: query.limit])
 
     def inspect_media(
         self,
@@ -130,7 +122,6 @@ class DirectorMomentTools:
 
 class AgentToolPermissionError(ValueError):
     pass
-
 
 class ComponentAgentTools(Protocol):
     """Narrow component-library boundary exposed to the bounded tool loop."""
@@ -168,6 +159,13 @@ _COMPONENT_DEPENDENCY_OPERATION_NAMES = frozenset(
         "set_caption_style",
     }
 )
+_OUTPUT_SETTINGS_OPERATION_NAMES = frozenset(
+    {
+        "set_output_settings",
+        "set_visual_crop",
+        "set_visual_reframe",
+    }
+)
 
 
 class AgentToolRegistry:
@@ -180,10 +178,18 @@ class AgentToolRegistry:
         proposal_validator: Callable[[PatchProposal], None] | None = None,
         prior_steps: tuple[AgentToolStep, ...] = (),
         component_tools: ComponentAgentTools | None = None,
+        moment_search_provider: RerankProvider | None = None,
     ) -> None:
         self._context = context
         self._allowed = frozenset(context.allowed_tools)
-        self._moments = DirectorMomentTools(context) if context.moments else None
+        self._moments = (
+            DirectorMomentTools(
+                context,
+                search_provider=moment_search_provider,
+            )
+            if context.moments and moment_search_provider is not None
+            else None
+        )
         self._proposal_validator = proposal_validator
         self._component_tools = component_tools
         self._searched_moment_ids: set[str] = set()
@@ -206,14 +212,9 @@ class AgentToolRegistry:
                 document=self._context.document,
             )
         if isinstance(call, SearchMomentsCall):
-            hits = self._moments.search_moments(call.query) if self._moments else ()
-            result = AgentToolResult(
-                call_id=call.call_id,
-                tool=call.tool,
-                hits=hits,
+            raise AgentToolPermissionError(
+                "search_moments requires the asynchronous model-search path"
             )
-            self._remember_evidence(result)
-            return result
         if isinstance(call, InspectMediaCall):
             if self._moments is None:
                 raise MomentToolError("this Agent turn has no Moment evidence")
@@ -260,6 +261,7 @@ class AgentToolRegistry:
                 tool=call.tool,
                 component_candidate=self._component_tools.create_candidate(request),
             )
+
         if isinstance(call, ProposePatchCall):
             scope = call.proposal.scope
             operation_names = {
@@ -269,6 +271,10 @@ class AgentToolRegistry:
                 raise AgentToolPermissionError(
                     "set_timeline_duration requires global scope with "
                     "allow_ripple=true"
+                )
+            if scope.kind != "global" and "set_output_settings" in operation_names:
+                raise AgentToolPermissionError(
+                    "set_output_settings requires global scope"
                 )
             if scope.kind == "global":
                 ripple_edit = (
@@ -283,10 +289,22 @@ class AgentToolRegistry:
                         _COMPONENT_DEPENDENCY_OPERATION_NAMES
                     )
                 )
-                if not (ripple_edit or component_dependency_edit):
+                output_settings_edit = (
+                    not scope.allow_ripple
+                    and "set_output_settings" in operation_names
+                    and operation_names.issubset(
+                        _OUTPUT_SETTINGS_OPERATION_NAMES
+                    )
+                )
+                if not (
+                    ripple_edit
+                    or component_dependency_edit
+                    or output_settings_edit
+                ):
                     raise AgentToolPermissionError(
                         "global continuous-edit proposals are limited to explicit "
-                        "ripple timeline edits or an exact component dependency update"
+                        "ripple timeline edits, output settings, or an exact component "
+                        "dependency update"
                     )
             _validate_operation_targets(
                 self._context.document,
@@ -320,6 +338,25 @@ class AgentToolRegistry:
                 proposal=call.proposal,
             )
         raise TypeError(f"unsupported Agent tool call {type(call).__name__}")
+
+    async def execute_async(self, call: AgentToolCall) -> AgentToolResult:
+        if call.tool not in self._allowed:
+            raise AgentToolPermissionError(
+                f"tool {call.tool!r} is not allowed for this Agent turn"
+            )
+        if not isinstance(call, SearchMomentsCall):
+            return self.execute(call)
+        if self._moments is None:
+            raise MomentToolError(
+                "search_moments has no configured semantic search provider"
+            )
+        result = AgentToolResult(
+            call_id=call.call_id,
+            tool=call.tool,
+            hits=await self._moments.search_moments(call.query),
+        )
+        self._remember_evidence(result)
+        return result
 
     def _remember_evidence(self, result: AgentToolResult) -> None:
         if result.hits is not None:
@@ -902,7 +939,3 @@ def _require_paired_operation(
             f"for matching source audio {audio_clip_id!r}"
         )
     return operation
-
-
-def _tokens(value: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]", value.casefold()))

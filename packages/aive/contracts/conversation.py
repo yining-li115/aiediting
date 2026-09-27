@@ -22,6 +22,7 @@ from .patch_project import (
     AddTrack,
     SetCreativePlan,
     SetDependencies,
+    SetOutputSettings,
     SetTimelineDuration,
 )
 from .patch_timeline import (
@@ -73,6 +74,25 @@ class CreateConversationRequest(ContractModel):
     purpose: ConversationPurpose = "primary"
 
 
+class PreviewSpatialRegion(ContractModel):
+    """Normalized rectangle inside the rendered video content, excluding letterbox."""
+
+    kind: Literal["rect"] = "rect"
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def stays_inside_video(self) -> PreviewSpatialRegion:
+        tolerance = 1e-9
+        if self.x + self.width > 1 + tolerance:
+            raise ValueError("preview spatial region exceeds horizontal bounds")
+        if self.y + self.height > 1 + tolerance:
+            raise ValueError("preview spatial region exceeds vertical bounds")
+        return self
+
+
 class PreviewAnnotation(ContractModel):
     """A user-authored comment on an exact interval of one rendered Revision."""
 
@@ -80,6 +100,7 @@ class PreviewAnnotation(ContractModel):
     revision_id: StableId
     artifact_id: StableId
     output_range: FrameRange
+    spatial_region: PreviewSpatialRegion | None = None
     comment: str = Field(min_length=1, max_length=2_000)
 
     @model_validator(mode="after")
@@ -218,11 +239,9 @@ class AgentTurnContext(ContractModel):
 
 
 class MomentSearchQuery(ContractModel):
-    text: str | None = Field(default=None, max_length=2_000)
-    semantic_roles: tuple[str, ...] = ()
+    text: str = Field(min_length=1, max_length=2_000)
     require_speech: bool | None = None
     usable_only: bool = True
-    minimum_quality: float | None = Field(default=None, ge=0, le=1)
     limit: int = Field(default=20, ge=1, le=50)
 
 
@@ -236,6 +255,7 @@ ContinuousEditOperation = Annotated[
     AddTrack
     | SetCreativePlan
     | SetDependencies
+    | SetOutputSettings
     | SetTimelineDuration
     | DeleteVisualClip
     | ReplaceVisualSource

@@ -5,12 +5,9 @@ is no exception. Hand-written TypeScript mirroring them drifts silently: a
 renamed field breaks at runtime in the browser, weeks after the rename, with
 an error that points at the wrong place.
 
-Two sources, deliberately:
-
-* the **domain specs** (EditPlanSpec, TimelineSpec, MaterialSegment ...) are
-  the real contract and change more often than the endpoints;
-* the **project kernel and API envelopes** cover request and response shapes
-  that cross the HTTP boundary.
+The ProjectDoc kernel and API envelopes are the only browser-visible
+contracts. Legacy TimelineSpec/plan/material-pool schemas are intentionally
+not exported because ProjectDoc is the sole authoritative edit state.
 
 Run after changing an exported Pydantic contract or API envelope:
 
@@ -28,16 +25,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "packages"))
 
-from aive.specs import (  # noqa: E402
-    Asset,
-    EditOperation,
-    EditPlanSpec,
-    EditScope,
-    MaterialSegment,
-    ProjectVersion,
-    ReferenceAnalysis,
-    TimelineSpec,
-)
 from aive.contracts.patch import Patch  # noqa: E402
 from aive.contracts.conversation import (  # noqa: E402
     AgentTurn,
@@ -83,14 +70,6 @@ TYPES_PATH = OUT_DIR / "types.ts"
 # deliberate act: a type the UI can see is a type the UI will start depending
 # on, and the ones left out are internal for a reason.
 EXPORTED = [
-    EditPlanSpec,
-    TimelineSpec,
-    MaterialSegment,
-    Asset,
-    ReferenceAnalysis,
-    EditOperation,
-    EditScope,
-    ProjectVersion,
     ProjectDoc,
     CreateProjectRequest,
     Patch,

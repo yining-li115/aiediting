@@ -122,6 +122,7 @@ class AgentTurnContextBuilder:
                     if status.analysis_readiness in {"ready", "partial"}
                     else "partial"
                 ),
+                audio_analysis=status.audio_analysis,
             )
             for status in asset_statuses
             if status.asset_id in refs and status.readiness == "ready"

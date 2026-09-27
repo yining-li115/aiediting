@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from ..contracts.audio import AudioAssetAnalysis
 from ..contracts.director import AgentAssetContext, AgentRunContext
 from ..contracts.moments import MomentEvidence
 from ..contracts.revision import ProjectRevision
+from ..contracts.style_reference import StyleReferenceBlueprint
 from ..media.repository import AssetProcessingRecord
 
 
@@ -21,15 +23,30 @@ class AgentRunContextBuilder:
         revision: ProjectRevision,
         asset_statuses: tuple[AssetProcessingRecord, ...],
         moments: tuple[MomentEvidence, ...],
+        style_reference_blueprints: tuple[StyleReferenceBlueprint, ...] = (),
+        audio_asset_analyses: tuple[AudioAssetAnalysis, ...] = (),
     ) -> AgentRunContext:
         document = revision.document
         statuses = {status.asset_id: status for status in asset_statuses}
-        asset_order = {
-            asset.asset_id: index for index, asset in enumerate(document.assets)
+        audio_analyses: dict[str, AudioAssetAnalysis] = {}
+        for analysis in audio_asset_analyses:
+            if analysis.project_id != document.project_id:
+                raise DirectorContextError(
+                    f"audio analysis for {analysis.asset_id!r} belongs to another project"
+                )
+            if analysis.asset_id in audio_analyses:
+                raise DirectorContextError(
+                    f"duplicate audio analysis for Asset {analysis.asset_id!r}"
+                )
+            audio_analyses[analysis.asset_id] = analysis
+        source_order = {
+            asset.asset_id: index
+            for index, asset in enumerate(document.assets)
+            if "source" in asset.roles
         }
         assets: list[AgentAssetContext] = []
         for asset in document.assets:
-            if not ({"source", "music"} & set(asset.roles)):
+            if not ({"source", "music", "sfx"} & set(asset.roles)):
                 continue
             status = statuses.get(asset.asset_id)
             if status is None:
@@ -62,6 +79,9 @@ class AgentRunContextBuilder:
                     analysis_readiness=(
                         status.analysis_readiness if needs_analysis else "ready"
                     ),
+                    audio_analysis=(
+                        audio_analyses.get(asset.asset_id) or status.audio_analysis
+                    ),
                 )
             )
 
@@ -74,12 +94,12 @@ class AgentRunContextBuilder:
                 raise DirectorContextError(
                     f"Moment {moment.moment_id!r} belongs to another project"
                 )
-            if moment.asset_id not in asset_order:
+            if moment.asset_id not in source_order:
                 continue
             scoped.append(moment)
         scoped.sort(
             key=lambda moment: (
-                asset_order[moment.asset_id],
+                source_order[moment.asset_id],
                 moment.ordinal,
                 moment.source.start,
                 moment.moment_id,
@@ -96,5 +116,6 @@ class AgentRunContextBuilder:
             output=document.timeline.output,
             assets=tuple(assets),
             moments=tuple(scoped),
+            style_reference_blueprints=style_reference_blueprints,
             locked_target_ids=tuple(lock.target_id for lock in document.locks),
         )

@@ -3,18 +3,24 @@
 import {
   AlertCircle,
   Check,
-  Clock3,
   Download,
   Film,
   Flag,
+  History,
   LoaderCircle,
   MessageSquare,
   Play,
   RotateCcw,
-  Sparkles,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   ApiError,
@@ -36,14 +42,32 @@ import type {
   DirectorRun,
   FrameRange,
   PreviewAnnotation,
+  PreviewSpatialRegion,
   ProjectRevision,
   RenderArtifact,
   RestoreRevisionRequest,
 } from "@/lib/api/types";
-import { ConversationPanel } from "./ConversationPanel";
+import {
+  ConversationPanel,
+  type ProjectActivity,
+} from "./ConversationPanel";
 
 interface ProjectHistoryWorkspaceProps {
   projectId: string;
+}
+
+interface VideoContentBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface SpatialDrag {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
 }
 
 function newStableId(prefix: string) {
@@ -105,7 +129,7 @@ async function fetchRevisionState(projectId: string, signal?: AbortSignal) {
   return { history, head, assets, firstCut };
 }
 
-function readinessLabel(status?: AssetProcessingStatus) {
+function readinessLabel(status?: AssetProcessingStatus, isStyleReference = false) {
   if (!status) return "Not registered";
   if (status.readiness === "uploaded") return "Waiting";
   if (status.readiness === "processing") return "Preparing media";
@@ -113,6 +137,9 @@ function readinessLabel(status?: AssetProcessingStatus) {
     if (status.analysis_readiness === "pending") return "Waiting for analysis";
     if (status.analysis_readiness === "processing") return "Understanding footage";
     if (status.analysis_readiness === "ready") {
+      if (isStyleReference) {
+        return `Style evidence ready · ${status.moment_count} ${status.moment_count === 1 ? "sample" : "samples"}`;
+      }
       return `Understood · ${status.moment_count} ${status.moment_count === 1 ? "moment" : "moments"} · ${status.transcript_count} transcript segments`;
     }
     if (status.analysis_readiness === "partial") {
@@ -154,9 +181,17 @@ export function ProjectHistoryWorkspace({
   const [annotationDraftRange, setAnnotationDraftRange] =
     useState<FrameRange | null>(null);
   const [annotationComment, setAnnotationComment] = useState("");
+  const [annotationSpatialRegion, setAnnotationSpatialRegion] =
+    useState<PreviewSpatialRegion | null>(null);
+  const [drawingSpatialRegion, setDrawingSpatialRegion] = useState(false);
+  const [spatialDrag, setSpatialDrag] = useState<SpatialDrag | null>(null);
+  const [videoContentBox, setVideoContentBox] =
+    useState<VideoContentBox | null>(null);
   const [previewAnnotations, setPreviewAnnotations] = useState<
     PreviewAnnotation[]
   >([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversationProcessing, setConversationProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasActiveMedia = assetStatuses.some(
     (asset) =>
@@ -176,6 +211,10 @@ export function ProjectHistoryWorkspace({
       track.enabled !== false &&
       (track.clips?.length ?? 0) > 0,
   );
+  const styleReferenceCount =
+    current?.document.assets?.filter((asset) =>
+      asset.roles?.includes("style_reference"),
+    ).length ?? 0;
   const firstCutActive =
     firstCut?.status === "queued" ||
     firstCut?.status === "running" ||
@@ -197,19 +236,29 @@ export function ProjectHistoryWorkspace({
   } | null>(null);
   const pendingRenders = useRef(new Map<string, CreateRenderRequest>());
   const currentRevisionRef = useRef<string | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const refresh = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal, followHeadPreview = false) => {
       const { history, head, assets, firstCut: latestFirstCut } = await fetchRevisionState(
         projectId,
         signal,
       );
+      const headRenders = followHeadPreview
+        ? await listRevisionRenders(
+            projectId,
+            head.document.revision_id,
+            signal,
+          )
+        : null;
       const previousHeadId = currentRevisionRef.current;
       setRevisions(history);
       setCurrent(head);
       setAssetStatuses(assets);
       setFirstCut(latestFirstCut);
+      if (headRenders) setRenderArtifacts(headRenders);
       setSelectedId((existing) => {
+        if (followHeadPreview) return head.document.revision_id;
         const stillExists = history.some(
           (item) => item.document.revision_id === existing,
         );
@@ -246,7 +295,12 @@ export function ProjectHistoryWorkspace({
   }, [projectId, refresh]);
 
   useEffect(() => {
-    if (!hasActiveMedia && !firstCutActive && !waitingForFirstCut) return;
+    if (
+      conversationProcessing ||
+      (!hasActiveMedia && !firstCutActive && !waitingForFirstCut)
+    ) {
+      return;
+    }
     const controller = new AbortController();
     let timer: number;
     const poll = async () => {
@@ -267,7 +321,14 @@ export function ProjectHistoryWorkspace({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [firstCutActive, hasActiveMedia, projectId, refresh, waitingForFirstCut]);
+  }, [
+    conversationProcessing,
+    firstCutActive,
+    hasActiveMedia,
+    projectId,
+    refresh,
+    waitingForFirstCut,
+  ]);
 
   const selected = useMemo(
     () =>
@@ -341,12 +402,98 @@ export function ProjectHistoryWorkspace({
     (annotation) =>
       annotation.revision_id === current?.document.revision_id,
   );
+  const visibleSpatialAnnotations = currentPreviewAnnotations.filter(
+    (annotation) => {
+      const range = annotation.output_range;
+      return Boolean(
+        annotation.spatial_region &&
+          readyPreview &&
+          annotation.artifact_id === readyPreview.artifact_id &&
+          currentPreviewPlayhead !== null &&
+          range.start_frame <= currentPreviewPlayhead &&
+          currentPreviewPlayhead < range.start_frame + range.duration_frames,
+      );
+    },
+  );
+  const draftSpatialRegion = spatialDrag
+    ? {
+        kind: "rect" as const,
+        x: Math.min(spatialDrag.startX, spatialDrag.currentX),
+        y: Math.min(spatialDrag.startY, spatialDrag.currentY),
+        width: Math.abs(spatialDrag.currentX - spatialDrag.startX),
+        height: Math.abs(spatialDrag.currentY - spatialDrag.startY),
+      }
+    : annotationSpatialRegion;
   const canAnnotateCurrentPreview = Boolean(
     readyPreview &&
       current &&
       selected?.document.revision_id === current.document.revision_id &&
       currentPreviewPlayhead !== null,
   );
+  const firstCutFailed = Boolean(
+    firstCut?.status === "failed" ||
+      firstCut?.status === "render_failed" ||
+      firstCut?.status === "review_rejected" ||
+      firstCut?.status === "review_failed",
+  );
+  let projectActivity: ProjectActivity | null = null;
+  if (
+    firstCut?.status === "ready" &&
+    firstCut.decision &&
+    firstCut.result_revision_id === current?.document.revision_id
+  ) {
+    projectActivity = {
+      status: "succeeded",
+      headline: "First cut ready",
+      detail: [
+        firstCut.decision.explanation,
+        firstCut.render_review
+          ? `Review: ${firstCut.render_review.summary}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  } else if (firstCutFailed && firstCut) {
+    projectActivity = {
+      status: "failed",
+      headline: "The first cut stopped",
+      detail:
+        firstCut.status === "render_failed"
+          ? "The candidate preview failed to render. The previous version is still current."
+          : firstCut.status === "review_rejected"
+            ? firstCut.render_review?.summary ||
+              "The candidate did not pass review. The previous version is still current."
+            : firstCut.status === "review_failed"
+              ? firstCut.error ||
+                "The candidate could not be reviewed. The previous version is still current."
+              : firstCut.error ||
+                "The AI first cut failed. The previous version is still current.",
+    };
+  } else if (
+    !currentHasPrimaryVisual &&
+    (hasActiveMedia || firstCutActive || waitingForFirstCut)
+  ) {
+    projectActivity = {
+      status: "running",
+      headline: hasActiveMedia
+        ? "Understanding your media"
+        : firstCut?.status === "autofixing"
+          ? "Improving the first cut"
+          : firstCut?.status === "reviewing"
+            ? "Reviewing the first cut"
+            : firstCut?.status === "committed" ||
+                firstCut?.status === "awaiting_review"
+              ? "Rendering the first cut"
+              : "Directing the first cut",
+      detail:
+        firstCut?.status === "autofixing"
+          ? "The Reviewer found a repairable issue, so the Director is preparing one bounded correction."
+          : styleReferenceCount > 0
+            ? `The Agent is learning transferable editing grammar from ${styleReferenceCount} Style Reference${styleReferenceCount === 1 ? "" : "s"}, then building and reviewing the first cut.`
+            : "The Agent is building, rendering, and reviewing a candidate without replacing the current version early.",
+    };
+  }
   const capturePreviewPlayhead = (currentTime: number) => {
     if (!selected || !readyPreview) return;
     const frame = previewFrameAtTime(selected, readyPreview, currentTime);
@@ -360,14 +507,92 @@ export function ProjectHistoryWorkspace({
           },
     );
   };
+  const updateVideoContentBox = useCallback((video: HTMLVideoElement | null) => {
+    previewVideoRef.current = video;
+    if (
+      !video ||
+      video.videoWidth <= 0 ||
+      video.videoHeight <= 0 ||
+      video.clientWidth <= 0 ||
+      video.clientHeight <= 0
+    ) {
+      setVideoContentBox(null);
+      return;
+    }
+    const scale = Math.min(
+      video.clientWidth / video.videoWidth,
+      video.clientHeight / video.videoHeight,
+    );
+    const width = video.videoWidth * scale;
+    const height = video.videoHeight * scale;
+    setVideoContentBox({
+      left: video.offsetLeft + (video.clientWidth - width) / 2,
+      top: video.offsetTop + (video.clientHeight - height) / 2,
+      width,
+      height,
+    });
+  }, []);
+
+  useEffect(() => {
+    const update = () => updateVideoContentBox(previewVideoRef.current);
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [updateVideoContentBox]);
+
+  const spatialPoint = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+    };
+  };
+  const beginSpatialSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drawingSpatialRegion) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = spatialPoint(event);
+    setSpatialDrag({
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+    });
+  };
+  const moveSpatialSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!spatialDrag) return;
+    const point = spatialPoint(event);
+    setSpatialDrag((drag) =>
+      drag
+        ? { ...drag, currentX: point.x, currentY: point.y }
+        : drag,
+    );
+  };
+  const finishSpatialSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!spatialDrag) return;
+    const point = spatialPoint(event);
+    const x = Math.min(spatialDrag.startX, point.x);
+    const y = Math.min(spatialDrag.startY, point.y);
+    const width = Math.abs(point.x - spatialDrag.startX);
+    const height = Math.abs(point.y - spatialDrag.startY);
+    setSpatialDrag(null);
+    if (width < 0.01 || height < 0.01) return;
+    setAnnotationSpatialRegion({ kind: "rect", x, y, width, height });
+    setDrawingSpatialRegion(false);
+  };
   const clearAnnotationDraft = () => {
     setAnnotationStartFrame(null);
     setAnnotationDraftRange(null);
     setAnnotationComment("");
+    setAnnotationSpatialRegion(null);
+    setDrawingSpatialRegion(false);
+    setSpatialDrag(null);
   };
   const markCurrentFrame = () => {
     if (currentPreviewPlayhead === null) return;
     setAnnotationStartFrame(null);
+    setAnnotationSpatialRegion(null);
+    setDrawingSpatialRegion(false);
+    setSpatialDrag(null);
     setAnnotationDraftRange({
       start_frame: currentPreviewPlayhead,
       duration_frames: 1,
@@ -378,6 +603,9 @@ export function ProjectHistoryWorkspace({
     if (annotationStartFrame === null) {
       setAnnotationStartFrame(currentPreviewPlayhead);
       setAnnotationDraftRange(null);
+      setAnnotationSpatialRegion(null);
+      setDrawingSpatialRegion(false);
+      setSpatialDrag(null);
       return;
     }
     const start = Math.min(annotationStartFrame, currentPreviewPlayhead);
@@ -406,6 +634,7 @@ export function ProjectHistoryWorkspace({
         revision_id: current.document.revision_id,
         artifact_id: readyPreview.artifact_id,
         output_range: annotationDraftRange,
+        spatial_region: annotationSpatialRegion ?? undefined,
         comment,
       },
     ]);
@@ -555,264 +784,274 @@ export function ProjectHistoryWorkspace({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[100rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-7">
-      <div>
-        <p className="text-xs font-medium uppercase tracking-[0.14em] text-ink-faint">
-          Project {projectId}
-        </p>
-        <h1 className="mt-1 text-2xl font-semibold tracking-tight">AI editing workspace</h1>
-        <p className="mt-1 text-sm text-ink-soft">
-          Direct the edit on the left, preview the selected Revision on the right, and restore any committed version without losing history.
-        </p>
-      </div>
+    <div className="grid h-full min-h-0 w-full grid-rows-[minmax(18rem,42vh)_minmax(0,1fr)] overflow-hidden bg-white lg:grid-cols-[22rem_minmax(0,1fr)] lg:grid-rows-1">
+      <aside className="min-h-0 overflow-hidden border-b border-line lg:border-b-0 lg:border-r">
+        <ConversationPanel
+          projectId={projectId}
+          currentRevisionId={current?.document.revision_id ?? null}
+          playheadFrame={currentPreviewPlayhead}
+          projectActivity={projectActivity}
+          previewAnnotations={currentPreviewAnnotations}
+          onRemovePreviewAnnotation={(annotationId) =>
+            setPreviewAnnotations((annotations) =>
+              annotations.filter(
+                (annotation) => annotation.annotation_id !== annotationId,
+              ),
+            )
+          }
+          onPreviewAnnotationsConsumed={() => setPreviewAnnotations([])}
+          onProcessingChange={setConversationProcessing}
+          onRevisionChanged={() => refresh(undefined, true)}
+        />
+      </aside>
 
-      {error && (
-        <div className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <AlertCircle className="mt-0.5 shrink-0" size={16} />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {(hasActiveMedia || firstCutActive || waitingForFirstCut) && (
-        <div className="flex items-start gap-3 rounded-[var(--radius-control)] border border-accent/20 bg-accent-soft/50 px-4 py-3 text-sm text-ink">
-          <LoaderCircle className="mt-0.5 shrink-0 animate-spin text-accent" size={17} />
-          <div>
-            <p className="font-medium">
-              {hasActiveMedia
-                ? "Understanding your media"
-                : firstCut?.status === "autofixing"
-                  ? "Improving your AI first cut"
-                : firstCut?.status === "reviewing"
-                  ? "Reviewing your AI first cut"
-                  : firstCut?.status === "committed" ||
-                      firstCut?.status === "awaiting_review"
-                    ? "Rendering your AI first cut"
-                  : "Directing your AI first cut"}
-            </p>
-            <p className="mt-0.5 text-xs text-ink-soft">
-              {firstCut?.status === "autofixing"
-                ? "The Reviewer found a repairable issue. The Director is creating a new candidate without changing your current version."
-                : "The Director builds a candidate revision, then renders and reviews it before making it current."}
+      <section className="relative flex min-h-0 min-w-0 flex-col bg-[#f8f8f8]">
+        <div className="relative flex h-12 shrink-0 items-center justify-between border-b border-line bg-white px-3">
+          <div className="min-w-0 pr-3">
+            <p className="truncate text-[11px] font-medium text-ink-soft">
+              {selected ? revisionTitle(selected) : "Project preview"}
             </p>
           </div>
-        </div>
-      )}
 
-      {(firstCut?.status === "failed" ||
-        firstCut?.status === "render_failed" ||
-        firstCut?.status === "review_rejected" ||
-        firstCut?.status === "review_failed") && (
-        <div className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <AlertCircle className="mt-0.5 shrink-0" size={16} />
-          <span>
-            {firstCut.status === "render_failed"
-              ? "The candidate preview failed to render; the previous revision is still current."
-              : firstCut.status === "review_rejected"
-                ? firstCut.render_review?.summary ||
-                  "The rendered candidate did not pass review; the previous revision is still current."
-                : firstCut.status === "review_failed"
-                  ? firstCut.error ||
-                    "The rendered candidate could not be reviewed; the previous revision is still current."
-              : firstCut.error || "The AI first cut failed; the previous revision is still current."}
-          </span>
-        </div>
-      )}
-
-      {firstCut?.status === "ready" &&
-        firstCut.decision &&
-        firstCut.result_revision_id === current?.document.revision_id && (
-        <div className="flex items-start gap-3 rounded-[var(--radius-control)] border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          <Sparkles className="mt-0.5 shrink-0" size={17} />
-          <div>
-            <p className="font-medium">AI first cut ready</p>
-            <p className="mt-0.5 text-xs text-emerald-800/80">
-              {firstCut.decision.explanation}
-            </p>
-            {firstCut.render_review && (
-              <p className="mt-1 text-xs text-emerald-800/80">
-                Reviewer: {firstCut.render_review.summary}
-              </p>
-            )}
-            {(firstCut.render_autofix_attempts ?? 0) > 0 && (
-              <p className="mt-1 text-xs text-emerald-800/80">
-                Passed after {firstCut.render_autofix_attempts ?? 0} bounded AutoFix attempt.
-              </p>
-            )}
+          <div className="absolute left-1/2 flex -translate-x-1/2 rounded-lg bg-[#f1f1f1] p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => {
+                setPreviewMode("preview");
+                setDrawingSpatialRegion(false);
+                setSpatialDrag(null);
+              }}
+              className={`rounded-md px-3 py-1.5 transition ${
+                previewMode === "preview"
+                  ? "bg-white font-medium text-ink shadow-sm"
+                  : "text-ink-faint hover:text-ink"
+              }`}
+            >
+              Preview
+            </button>
+            <button
+              type="button"
+              onClick={() => setPreviewMode("annotate")}
+              className={`rounded-md px-3 py-1.5 transition ${
+                previewMode === "annotate"
+                  ? "bg-white font-medium text-ink shadow-sm"
+                  : "text-ink-faint hover:text-ink"
+              }`}
+            >
+              Preview edit
+            </button>
           </div>
-        </div>
-      )}
 
-      <div className="grid min-h-[32rem] overflow-hidden rounded-[var(--radius-card)] border border-line bg-surface lg:grid-cols-[22rem_minmax(0,1fr)]">
-        <section id="history" className="border-b border-line lg:border-b-0 lg:border-r">
-          <ConversationPanel
-            projectId={projectId}
-            currentRevisionId={current?.document.revision_id ?? null}
-            playheadFrame={currentPreviewPlayhead}
-            previewAnnotations={currentPreviewAnnotations}
-            onRemovePreviewAnnotation={(annotationId) =>
-              setPreviewAnnotations((annotations) =>
-                annotations.filter(
-                  (annotation) => annotation.annotation_id !== annotationId,
-                ),
-              )
-            }
-            onPreviewAnnotationsConsumed={() => setPreviewAnnotations([])}
-            onRevisionChanged={refresh}
-          />
-          <div className="border-b border-line px-5 py-4">
-            <h2 className="text-sm font-semibold">Committed versions</h2>
-            <p className="mt-0.5 text-xs text-ink-faint">
-              {revisions.length} {revisions.length === 1 ? "version" : "versions"}
-            </p>
-          </div>
-          <div className="max-h-[65vh] overflow-y-auto p-2">
-            {[...revisions].reverse().map((revision) => {
-              const revisionId = revision.document.revision_id;
-              const isCurrent = revisionId === current?.document.revision_id;
-              const isSelected = revisionId === selected?.document.revision_id;
-              return (
-                <button
-                  key={revisionId}
-                  type="button"
-                  onClick={() => {
-                    setSelectedId(revisionId);
-                    setRangeStart(0);
-                    setRangeDuration(
-                      Math.min(90, revision.document.timeline.duration_frames),
-                    );
-                    clearAnnotationDraft();
-                    setPreviewAnnotations([]);
-                  }}
-                  className={`mb-1 w-full rounded-[var(--radius-control)] border px-3.5 py-3 text-left transition-colors ${
-                    isSelected
-                      ? "border-accent bg-accent-soft/60"
-                      : "border-transparent hover:border-line hover:bg-canvas"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-medium">
-                        {revisionTitle(revision)}
-                      </span>
-                      <span className="mt-1 block text-[11px] text-ink-faint">
-                        {formatCreatedAt(revision.created_at)}
-                      </span>
-                    </span>
-                    {isCurrent && (
-                      <span className="flex shrink-0 items-center gap-1 rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-accent">
-                        <Check size={10} /> Current
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-2 flex items-center justify-between text-[11px] text-ink-soft">
-                    <span>{revisionKind(revision)}</span>
-                    <span className="max-w-32 truncate font-mono">{revisionId}</span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="min-w-0 p-5 sm:p-7">
-          {selected ? (
-            <>
-              <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-xs font-medium text-accent">
-                    <Clock3 size={14} /> {revisionKind(selected)}
-                  </div>
-                  <h2 className="mt-2 truncate text-xl font-semibold">
-                    {revisionTitle(selected)}
-                  </h2>
-                  <p className="mt-1 break-all font-mono text-xs text-ink-faint">
-                    {selected.document.revision_id}
-                  </p>
-                </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {selected &&
+              selected.document.revision_id !== current?.document.revision_id && (
                 <button
                   type="button"
                   onClick={restore}
-                  disabled={
-                    restoring ||
-                    selected.document.revision_id === current?.document.revision_id
-                  }
-                  className="flex h-9 shrink-0 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-ink px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
+                  disabled={restoring}
+                  className="flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium text-ink-soft hover:bg-accent-soft disabled:opacity-35"
                 >
                   {restoring ? (
-                    <LoaderCircle className="animate-spin" size={14} />
+                    <LoaderCircle className="animate-spin" size={13} />
                   ) : (
-                    <RotateCcw size={14} />
+                    <RotateCcw size={13} />
                   )}
-                  {selected.document.revision_id === current?.document.revision_id
-                    ? "Current version"
-                    : "Restore as new version"}
+                  Restore
                 </button>
-              </div>
+              )}
+            <button
+              id="history"
+              type="button"
+              aria-expanded={historyOpen}
+              onClick={() => setHistoryOpen((open) => !open)}
+              className={`flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium transition ${
+                historyOpen
+                  ? "bg-accent-soft text-ink"
+                  : "text-ink-soft hover:bg-accent-soft hover:text-ink"
+              }`}
+            >
+              <History size={13} /> History
+            </button>
+          </div>
+        </div>
 
-              <div className="mt-7 overflow-hidden rounded-[var(--radius-card)] border border-line bg-[#111318]">
-                <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5 text-white">
-                  <div className="flex rounded-lg bg-white/5 p-1 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setPreviewMode("preview")}
-                      className={`rounded-md px-3 py-1.5 transition ${
-                        previewMode === "preview"
-                          ? "bg-white font-semibold text-black"
-                          : "text-white/60 hover:text-white"
-                      }`}
-                    >
-                      Preview
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewMode("annotate")}
-                      className={`rounded-md px-3 py-1.5 transition ${
-                        previewMode === "annotate"
-                          ? "bg-white font-semibold text-black"
-                          : "text-white/60 hover:text-white"
-                      }`}
-                    >
-                      Preview edit
-                    </button>
-                  </div>
-                  {previewMode === "annotate" && currentPreviewPlayhead !== null && (
-                    <span className="font-mono text-[11px] text-white/55">
-                      Frame {currentPreviewPlayhead}
-                    </span>
-                  )}
-                </div>
-                <div className="flex min-h-72 items-center justify-center bg-black/40 p-4">
+        {historyOpen && (
+          <div className="absolute right-3 top-14 z-30 w-[min(21rem,calc(100%-1.5rem))] overflow-hidden rounded-xl border border-line-strong bg-white shadow-[0_18px_60px_rgba(0,0,0,0.14)]">
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <div>
+                <p className="text-xs font-semibold">Version history</p>
+                <p className="mt-0.5 text-[10px] text-ink-faint">
+                  {revisions.length} committed {revisions.length === 1 ? "version" : "versions"}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close version history"
+                onClick={() => setHistoryOpen(false)}
+                className="rounded-md p-1.5 text-ink-faint hover:bg-accent-soft hover:text-ink"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto p-2">
+              {[...revisions].reverse().map((revision) => {
+                const revisionId = revision.document.revision_id;
+                const isCurrent = revisionId === current?.document.revision_id;
+                const isSelected = revisionId === selected?.document.revision_id;
+                return (
+                  <button
+                    key={revisionId}
+                    type="button"
+                    onClick={() => {
+                      setSelectedId(revisionId);
+                      setRangeStart(0);
+                      setRangeDuration(
+                        Math.min(90, revision.document.timeline.duration_frames),
+                      );
+                      clearAnnotationDraft();
+                      setPreviewAnnotations([]);
+                      setHistoryOpen(false);
+                    }}
+                    className={`mb-1 w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      isSelected
+                        ? "border-line-strong bg-accent-soft"
+                        : "border-transparent hover:bg-canvas"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-medium">
+                          {revisionTitle(revision)}
+                        </span>
+                        <span className="mt-1 block text-[10px] text-ink-faint">
+                          {formatCreatedAt(revision.created_at)} · {revisionKind(revision)}
+                        </span>
+                      </span>
+                      {isCurrent && (
+                        <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-ink-soft">
+                          <Check size={10} /> Current
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="absolute left-1/2 top-16 z-20 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-start gap-2 rounded-lg border border-red-200 bg-white px-3 py-2.5 text-xs text-red-700 shadow-lg">
+            <AlertCircle className="mt-0.5 shrink-0" size={14} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5 sm:py-5">
+          {selected ? (
+            <>
+              <div className="mx-auto w-full max-w-[90rem] overflow-hidden rounded-[var(--radius-card)] border border-line bg-[#111318] shadow-[0_16px_50px_rgba(0,0,0,0.08)]">
+                <div className="flex min-h-80 items-center justify-center bg-black/40 p-4">
                   {readyPreview ? (
-                    <video
-                      key={readyPreview.artifact_id}
-                      controls
-                      playsInline
-                      onLoadedMetadata={(event) =>
-                        capturePreviewPlayhead(event.currentTarget.currentTime)
-                      }
-                      onTimeUpdate={(event) =>
-                        capturePreviewPlayhead(event.currentTarget.currentTime)
-                      }
-                      onSeeked={(event) =>
-                        capturePreviewPlayhead(event.currentTarget.currentTime)
-                      }
-                      className="max-h-[32rem] w-full rounded-md object-contain"
-                      src={renderContentUrl(projectId, readyPreview.artifact_id)}
-                    >
-                      Your browser does not support video playback.
-                    </video>
+                    <div className="relative flex w-full justify-center">
+                      <video
+                        key={readyPreview.artifact_id}
+                        ref={updateVideoContentBox}
+                        width={selected.document.timeline.output.width}
+                        height={selected.document.timeline.output.height}
+                        controls
+                        playsInline
+                        onLoadStart={() => setVideoContentBox(null)}
+                        onLoadedMetadata={(event) => {
+                          capturePreviewPlayhead(event.currentTarget.currentTime);
+                          updateVideoContentBox(event.currentTarget);
+                        }}
+                        onTimeUpdate={(event) =>
+                          capturePreviewPlayhead(event.currentTarget.currentTime)
+                        }
+                        onSeeked={(event) =>
+                          capturePreviewPlayhead(event.currentTarget.currentTime)
+                        }
+                        className="h-auto max-h-[65vh] w-auto max-w-full rounded-md object-contain"
+                        src={renderContentUrl(projectId, readyPreview.artifact_id)}
+                      >
+                        Your browser does not support video playback.
+                      </video>
+                      {previewMode === "annotate" && videoContentBox && (
+                        <div
+                          aria-label="Preview spatial annotation canvas"
+                          onPointerDown={beginSpatialSelection}
+                          onPointerMove={moveSpatialSelection}
+                          onPointerUp={finishSpatialSelection}
+                          onPointerCancel={() => {
+                            setSpatialDrag(null);
+                            setDrawingSpatialRegion(false);
+                          }}
+                          className={`absolute touch-none select-none overflow-hidden rounded-sm ${
+                            drawingSpatialRegion
+                              ? "z-20 cursor-crosshair pointer-events-auto"
+                              : "z-10 pointer-events-none"
+                          }`}
+                          style={{
+                            left: videoContentBox.left,
+                            top: videoContentBox.top,
+                            width: videoContentBox.width,
+                            height: videoContentBox.height,
+                          }}
+                        >
+                          {visibleSpatialAnnotations.map((annotation, index) => {
+                            const region = annotation.spatial_region;
+                            if (!region) return null;
+                            return (
+                              <div
+                                key={annotation.annotation_id}
+                                className="absolute border-2 border-amber-300 bg-amber-300/10 shadow-[0_0_0_1px_rgba(0,0,0,0.55)]"
+                                style={{
+                                  left: `${region.x * 100}%`,
+                                  top: `${region.y * 100}%`,
+                                  width: `${region.width * 100}%`,
+                                  height: `${region.height * 100}%`,
+                                }}
+                              >
+                                <span className="absolute -top-5 left-0 rounded bg-amber-300 px-1.5 py-0.5 text-[9px] font-bold text-black">
+                                  {index + 1}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {draftSpatialRegion &&
+                            draftSpatialRegion.width > 0 &&
+                            draftSpatialRegion.height > 0 && (
+                              <div
+                                className="absolute border-2 border-accent bg-accent/15 shadow-[0_0_0_1px_rgba(255,255,255,0.65)]"
+                                style={{
+                                  left: `${draftSpatialRegion.x * 100}%`,
+                                  top: `${draftSpatialRegion.y * 100}%`,
+                                  width: `${draftSpatialRegion.width * 100}%`,
+                                  height: `${draftSpatialRegion.height * 100}%`,
+                                }}
+                              />
+                            )}
+                          {drawingSpatialRegion && !spatialDrag && (
+                            <div className="pointer-events-none absolute inset-x-3 top-3 rounded-md bg-black/70 px-3 py-2 text-center text-[11px] font-medium text-white">
+                              Drag over the exact area you want the AI to see.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   ) : firstReadyAsset?.kind === "photo" ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       alt={firstReadyAsset.label || "Uploaded source"}
-                      className="max-h-[32rem] w-full rounded-md object-contain"
+                      className="max-h-[65vh] w-full rounded-md object-contain"
                       src={assetProxyUrl(projectId, firstReadyAsset.asset_id)}
                     />
                   ) : firstReadyAsset ? (
                     <video
                       controls
                       playsInline
-                      className="max-h-[32rem] w-full rounded-md object-contain"
+                      className="max-h-[65vh] w-full rounded-md object-contain"
                       poster={assetThumbnailUrl(projectId, firstReadyAsset.asset_id)}
                       src={assetProxyUrl(projectId, firstReadyAsset.asset_id)}
                     >
@@ -936,6 +1175,57 @@ export function ProjectHistoryWorkspace({
                                   <X size={13} />
                                 </button>
                               </div>
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (drawingSpatialRegion) {
+                                      setDrawingSpatialRegion(false);
+                                      setSpatialDrag(null);
+                                      return;
+                                    }
+                                    previewVideoRef.current?.pause();
+                                    setAnnotationSpatialRegion(null);
+                                    setSpatialDrag(null);
+                                    setDrawingSpatialRegion(true);
+                                  }}
+                                  disabled={!videoContentBox}
+                                  className={`rounded-md border px-2.5 py-1.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-35 ${
+                                    drawingSpatialRegion
+                                      ? "border-accent bg-accent text-white"
+                                      : "border-white/20 text-white/80"
+                                  }`}
+                                >
+                                  {drawingSpatialRegion
+                                    ? "Cancel drawing"
+                                    : annotationSpatialRegion
+                                      ? "Redraw area"
+                                      : "Draw area (optional)"}
+                                </button>
+                                {annotationSpatialRegion && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAnnotationSpatialRegion(null);
+                                      setDrawingSpatialRegion(false);
+                                      setSpatialDrag(null);
+                                    }}
+                                    className="rounded-md px-2 py-1.5 text-[11px] text-white/55 hover:bg-white/10 hover:text-white"
+                                  >
+                                    Clear area
+                                  </button>
+                                )}
+                                {annotationSpatialRegion && (
+                                  <span className="font-mono text-[10px] text-amber-300">
+                                    Area {Math.round(annotationSpatialRegion.x * 100)}%,
+                                    {Math.round(annotationSpatialRegion.y * 100)}% · {Math.round(
+                                      annotationSpatialRegion.width * 100,
+                                    )}% × {Math.round(
+                                      annotationSpatialRegion.height * 100,
+                                    )}%
+                                  </span>
+                                )}
+                              </div>
                               <textarea
                                 aria-label="Preview annotation comment"
                                 value={annotationComment}
@@ -949,8 +1239,8 @@ export function ProjectHistoryWorkspace({
                               />
                               <div className="mt-2 flex items-center justify-between gap-3">
                                 <span className="text-[10px] text-white/40">
-                                  The exact Revision, preview, and frame range will be sent
-                                  with your message.
+                                  The exact Revision, preview, frame range, and optional
+                                  marked area will be sent with your message.
                                 </span>
                                 <button
                                   type="button"
@@ -973,7 +1263,7 @@ export function ProjectHistoryWorkspace({
                               ? `${currentPreviewAnnotations.length} annotation${
                                   currentPreviewAnnotations.length === 1 ? "" : "s"
                                 } attached to the AI editor.`
-                              : "Pause or scrub the video, mark a frame or range, then add a comment."}
+                              : "Pause or scrub the video, mark a frame or range, optionally draw an area, then add a comment."}
                           </p>
                         </>
                       )}
@@ -1063,93 +1353,103 @@ export function ProjectHistoryWorkspace({
                 </div>
               </div>
 
-              <div className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <Metric label="Duration" value={durationLabel(selected)} />
-                <Metric label="Assets" value={String(selected.document.assets?.length ?? 0)} />
-                <Metric label="Tracks" value={String(selected.document.timeline.tracks?.length ?? 0)} />
-                <Metric label="Locks" value={String(selected.document.locks?.length ?? 0)} />
-              </div>
-
-              <div className="mt-6 rounded-[var(--radius-control)] border border-line bg-canvas p-4">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">
-                  <Film size={14} /> Creative intent
-                </div>
-                <p className="mt-2 text-sm leading-6 text-ink">
-                  {selected.document.intent.prompt || "No prompt recorded for this version."}
-                </p>
-              </div>
-
-              {(selected.document.assets?.length ?? 0) > 0 && (
-                <div className="mt-6 rounded-[var(--radius-control)] border border-line bg-canvas p-4">
-                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">
-                    <Film size={14} /> Project media
+              <details className="mx-auto mt-3 w-full max-w-[90rem] rounded-lg border border-line bg-white">
+                <summary className="cursor-pointer select-none px-4 py-3 text-xs font-medium text-ink-soft hover:text-ink">
+                  Project details
+                </summary>
+                <div className="border-t border-line p-4">
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <Metric label="Duration" value={durationLabel(selected)} />
+                    <Metric label="Assets" value={String(selected.document.assets?.length ?? 0)} />
+                    <Metric label="Tracks" value={String(selected.document.timeline.tracks?.length ?? 0)} />
+                    <Metric label="Locks" value={String(selected.document.locks?.length ?? 0)} />
                   </div>
-                  <ul className="mt-3 space-y-2">
-                    {selected.document.assets?.map((asset) => {
-                      const processing = assetStatuses.find(
-                        (item) => item.asset_id === asset.asset_id,
-                      );
-                      return (
-                        <li
-                          key={asset.asset_id}
-                          className="flex items-center justify-between gap-4 text-sm"
-                        >
-                          <span className="min-w-0">
-                            <span className="block truncate text-ink">
-                              {asset.label || asset.asset_id}
-                            </span>
-                            {(processing?.error || processing?.analysis_error) && (
-                              <span className="mt-0.5 block truncate text-xs text-red-600">
-                                {processing.error || processing.analysis_error}
-                              </span>
-                            )}
-                          </span>
-                          <span className="shrink-0 text-right text-xs text-ink-faint">
-                            <span className="block">
-                              {asset.kind} · {(asset.roles ?? ["source"]).join(", ")}
-                            </span>
-                            <span
-                              className={
-                                processing?.analysis_readiness === "ready"
-                                  ? "text-emerald-600"
-                                  : processing?.analysis_readiness === "partial"
-                                    ? "text-amber-600"
-                                  : processing?.readiness === "failed"
-                                      || processing?.analysis_readiness === "failed"
-                                    ? "text-red-600"
-                                    : "text-accent"
-                              }
-                            >
-                              {readinessLabel(processing)}
-                            </span>
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              )}
 
-              <dl className="mt-6 grid gap-x-8 gap-y-4 text-sm sm:grid-cols-2">
-                <Detail label="Created" value={formatCreatedAt(selected.created_at)} />
-                <Detail label="Origin" value={selected.provenance.origin} />
-                <Detail label="Parent revision" value={selected.document.parent_revision_id ?? "None"} mono />
-                <Detail
-                  label="Restored from"
-                  value={selected.provenance.restored_from_revision_id ?? "Not a restore"}
-                  mono={Boolean(selected.provenance.restored_from_revision_id)}
-                />
-                <Detail label="Commit" value={selected.commit_id} mono />
-                <Detail label="Document hash" value={selected.document_hash} mono />
-              </dl>
+                  <div className="mt-4 rounded-[var(--radius-control)] bg-canvas p-4">
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                      <Film size={14} /> Creative intent
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-ink">
+                      {selected.document.intent.prompt || "No prompt recorded for this version."}
+                    </p>
+                  </div>
+
+                  {(selected.document.assets?.length ?? 0) > 0 && (
+                    <div className="mt-4 rounded-[var(--radius-control)] bg-canvas p-4">
+                      <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                        <Film size={14} /> Project media
+                      </div>
+                      <ul className="mt-3 space-y-2">
+                        {selected.document.assets?.map((asset) => {
+                          const processing = assetStatuses.find(
+                            (item) => item.asset_id === asset.asset_id,
+                          );
+                          return (
+                            <li
+                              key={asset.asset_id}
+                              className="flex items-center justify-between gap-4 text-sm"
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate text-ink">
+                                  {asset.label || asset.asset_id}
+                                </span>
+                                {(processing?.error || processing?.analysis_error) && (
+                                  <span className="mt-0.5 block truncate text-xs text-red-600">
+                                    {processing.error || processing.analysis_error}
+                                  </span>
+                                )}
+                              </span>
+                              <span className="shrink-0 text-right text-xs text-ink-faint">
+                                <span className="block">
+                                  {asset.kind} · {(asset.roles ?? ["source"]).join(", ")}
+                                </span>
+                                <span
+                                  className={
+                                    processing?.analysis_readiness === "ready"
+                                      ? "text-emerald-600"
+                                      : processing?.analysis_readiness === "partial"
+                                        ? "text-amber-600"
+                                      : processing?.readiness === "failed"
+                                          || processing?.analysis_readiness === "failed"
+                                        ? "text-red-600"
+                                        : "text-accent"
+                                  }
+                                >
+                                  {readinessLabel(
+                                    processing,
+                                    asset.roles?.includes("style_reference"),
+                                  )}
+                                </span>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                  <dl className="mt-4 grid gap-x-8 gap-y-4 text-sm sm:grid-cols-2">
+                    <Detail label="Created" value={formatCreatedAt(selected.created_at)} />
+                    <Detail label="Origin" value={selected.provenance.origin} />
+                    <Detail label="Parent revision" value={selected.document.parent_revision_id ?? "None"} mono />
+                    <Detail
+                      label="Restored from"
+                      value={selected.provenance.restored_from_revision_id ?? "Not a restore"}
+                      mono={Boolean(selected.provenance.restored_from_revision_id)}
+                    />
+                    <Detail label="Commit" value={selected.commit_id} mono />
+                    <Detail label="Document hash" value={selected.document_hash} mono />
+                  </dl>
+                </div>
+              </details>
             </>
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-ink-soft">
               This project has no committed revisions yet.
             </div>
           )}
-        </section>
-      </div>
+        </div>
+      </section>
     </div>
   );
 }

@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from ..contracts.audio import AudioAssetAnalysis
 from ..contracts.project_doc import AssetRef
 from ..media.repository import (
     AssetProcessingRecord,
@@ -75,6 +76,7 @@ class SqlAlchemyMediaAssetRepository:
                         analysis_job_id=None,
                         analysis_error=None,
                         analyzed_at=None,
+                        audio_analysis_json=None,
                         kind=record.kind,
                         original_name=record.original_name,
                         sha256=record.sha256,
@@ -284,6 +286,30 @@ class SqlAlchemyMediaAssetRepository:
             session.flush()
             return _processing_from_row(row)
 
+    def save_audio_analysis(
+        self,
+        analysis: AudioAssetAnalysis,
+    ) -> AssetProcessingRecord:
+        with self.session_factory.begin() as session:
+            row = session.get(Asset, analysis.asset_id)
+            if row is None or row.project_id != analysis.project_id:
+                raise ProjectAssetNotFound(
+                    f"asset {analysis.asset_id!r} is not registered to project "
+                    f"{analysis.project_id!r}"
+                )
+            if row.kind != "audio" or not row.has_audio:
+                raise AssetIdentityConflict(
+                    f"asset {analysis.asset_id!r} is not an audio Asset"
+                )
+            if row.sha256 != analysis.content_hash:
+                raise AssetIdentityConflict(
+                    f"audio analysis content hash does not match Asset "
+                    f"{analysis.asset_id!r}"
+                )
+            row.audio_analysis_json = analysis.model_dump(mode="json")
+            session.flush()
+            return _processing_from_row(row)
+
 
 def _record_from_row(row: Asset) -> MediaAssetRecord:
     if row.kind not in {"video", "photo", "audio"}:
@@ -338,6 +364,11 @@ def _processing_from_row(
         analysis_error=row.analysis_error,
         moment_count=moment_count,
         transcript_count=transcript_count,
+        audio_analysis=(
+            AudioAssetAnalysis.model_validate(row.audio_analysis_json)
+            if row.audio_analysis_json is not None
+            else None
+        ),
     )
 
 

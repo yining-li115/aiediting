@@ -8,11 +8,15 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .base import ContractModel, StableId
+from .audio import AudioAssetAnalysis, AudioVisualSyncDecision
 from .media import DatabaseId
-from .moments import MomentEvidence
+from .moments import MediaSourceSpan, ModelProvenance, MomentEvidence
 from .patch import Patch
 from .project_doc import AssetKind, AssetRole, OutputSettings, ProjectIntent
 from .rendering import RenderReviewReport, RenderReviewStatus
+from .style_reference import StyleReferenceBlueprint
+from .time import ConstantPlayback, FrameRange, Playback, SourceRange
+from .timeline import CaptionStyle, CropRect, ReframeSpec, TransitionSpec
 
 
 DirectorRunStatus = Literal[
@@ -29,10 +33,6 @@ DirectorRunStatus = Literal[
     "failed",
 ]
 
-DirectorPacing = Literal["calm", "balanced", "energetic", "dynamic"]
-CaptionMode = Literal["none", "speech", "highlights"]
-MusicMode = Literal["none", "source_only", "music_bed"]
-MusicEnergyCurve = Literal["steady", "build", "peak_early", "peak_late"]
 ReviewSeverity = Literal["warning", "error"]
 
 
@@ -59,12 +59,13 @@ class AgentAssetContext(ContractModel):
     fps: float = Field(ge=0)
     has_audio: bool
     analysis_readiness: Literal["ready", "partial"]
+    audio_analysis: AudioAssetAnalysis | None = None
 
 
 class AgentRunContext(ContractModel):
     """Frozen, model-safe input for one exact Director run."""
 
-    context_version: Literal["1.0"] = "1.0"
+    context_version: Literal["2.0"] = "2.0"
     project_id: DatabaseId
     base_revision_id: StableId
     document_hash: str = Field(
@@ -76,6 +77,7 @@ class AgentRunContext(ContractModel):
     output: OutputSettings
     assets: tuple[AgentAssetContext, ...] = Field(min_length=1)
     moments: tuple[MomentEvidence, ...] = Field(min_length=1)
+    style_reference_blueprints: tuple[StyleReferenceBlueprint, ...] = ()
     locked_target_ids: tuple[StableId, ...] = ()
 
     @model_validator(mode="after")
@@ -91,69 +93,177 @@ class AgentRunContext(ContractModel):
                 raise ValueError("Agent context contains a cross-project Moment")
             if moment.asset_id not in asset_ids:
                 raise ValueError("Agent context Moment references an unknown asset")
+        for asset in self.assets:
+            analysis = asset.audio_analysis
+            if analysis is not None and (
+                analysis.project_id != self.project_id
+                or analysis.asset_id != asset.asset_id
+            ):
+                raise ValueError("Agent context contains misbound audio analysis")
+        blueprint_ids = [
+            blueprint.blueprint_id
+            for blueprint in self.style_reference_blueprints
+        ]
+        blueprint_asset_ids = [
+            blueprint.asset_id
+            for blueprint in self.style_reference_blueprints
+        ]
+        if len(blueprint_ids) != len(set(blueprint_ids)):
+            raise ValueError("Agent context contains duplicate Style Blueprints")
+        if len(blueprint_asset_ids) != len(set(blueprint_asset_ids)):
+            raise ValueError("Agent context contains duplicate Style Reference Assets")
+        for blueprint in self.style_reference_blueprints:
+            if blueprint.project_id != self.project_id:
+                raise ValueError("Agent context contains a cross-project Style Blueprint")
+            if blueprint.asset_id in asset_ids:
+                raise ValueError(
+                    "Style Reference Assets cannot be selectable Director assets"
+                )
         return self
 
 
-class CreativeStrategy(ContractModel):
-    """The Director's creative brief before executable clip selection."""
+class EditSectionDecision(ContractModel):
+    """One model-authored narrative section in the proposed output."""
 
-    objective: str = Field(min_length=1, max_length=1_000)
-    hook: str | None = Field(default=None, max_length=500)
-    pacing: DirectorPacing = "balanced"
-    story_arc: tuple[str, ...] = Field(default=(), max_length=8)
-
-
-class CopyStrategy(ContractModel):
-    """First-draft copy direction; execution stays capability checked."""
-
-    title: str | None = Field(default=None, max_length=200)
-    hook_text: str | None = Field(default=None, max_length=500)
-    call_to_action: str | None = Field(default=None, max_length=500)
-    caption_mode: CaptionMode = "none"
-    caption_tone: str | None = Field(default=None, max_length=200)
+    section_key: StableId
+    output: FrameRange
+    role: str = Field(min_length=1, max_length=128)
+    goal: str = Field(min_length=1, max_length=1_000)
 
 
-class MusicStrategy(ContractModel):
-    """Audio direction without inventing or licensing a media asset."""
+class VisualEditDecision(ContractModel):
+    """An exact model choice that the Patch translator may copy, not reinterpret."""
 
-    mode: MusicMode = "source_only"
-    asset_id: StableId | None = None
-    mood_tags: tuple[str, ...] = Field(default=(), max_length=8)
-    energy_curve: MusicEnergyCurve = "steady"
-    duck_under_speech: bool = True
-    gain_db: float = Field(default=-18.0, ge=-48.0, le=0.0)
-    fade_in_frames: int = Field(default=15, ge=0, le=300)
-    fade_out_frames: int = Field(default=15, ge=0, le=300)
-    rationale: str | None = Field(default=None, max_length=1_000)
+    decision_key: StableId
+    moment_id: StableId
+    source: MediaSourceSpan | None = None
+    output: FrameRange
+    purpose: str = Field(min_length=1, max_length=1_000)
+    playback: Playback = ConstantPlayback()
+    crop: CropRect | None = None
+    reframe: ReframeSpec | None = None
+    transition_out: TransitionSpec | None = None
+    preserve_source_audio: bool = True
+
+
+class CaptionEditDecision(ContractModel):
+    decision_key: StableId
+    output: FrameRange
+    text: str = Field(min_length=1, max_length=4_000)
+    source: Literal["asr", "generated"]
+    speaker: str | None = Field(default=None, max_length=160)
+    evidence_moment_ids: tuple[StableId, ...] = Field(min_length=1)
+
+
+class MusicEditDecision(ContractModel):
+    decision_key: StableId
+    asset_id: StableId
+    source: SourceRange
+    output: FrameRange
+    gain_db: float = Field(ge=-96.0, le=24.0)
+    fade_in_frames: int = Field(default=0, ge=0)
+    fade_out_frames: int = Field(default=0, ge=0)
+    duck_under_speech: bool = False
+    purpose: str = Field(min_length=1, max_length=1_000)
+
+
+class SoundEffectEditDecision(ContractModel):
+    """One model-selected, evidence-backed SFX placement."""
+
+    decision_key: StableId
+    asset_id: StableId
+    source: SourceRange
+    output: FrameRange
+    gain_db: float = Field(ge=-96.0, le=24.0)
+    fade_in_frames: int = Field(default=0, ge=0)
+    fade_out_frames: int = Field(default=0, ge=0)
+    evidence_moment_ids: tuple[StableId, ...] = Field(min_length=1)
+    purpose: str = Field(min_length=1, max_length=1_000)
+
+
+class EditBlueprint(ContractModel):
+    """Complete model-authored first-cut grammar and executable decisions."""
+
+    blueprint_version: Literal["2.0"] = "2.0"
+    objective: str = Field(min_length=1, max_length=2_000)
+    narrative_summary: str = Field(min_length=1, max_length=4_000)
+    output_duration_frames: int = Field(gt=0)
+    sections: tuple[EditSectionDecision, ...] = Field(min_length=1)
+    visuals: tuple[VisualEditDecision, ...] = Field(min_length=1)
+    captions: tuple[CaptionEditDecision, ...] = ()
+    caption_style: CaptionStyle | None = None
+    music: tuple[MusicEditDecision, ...] = ()
+    sound_effects: tuple[SoundEffectEditDecision, ...] = ()
+    audio_visual_sync: tuple[AudioVisualSyncDecision, ...] = ()
+    style_application: tuple[str, ...] = ()
+    unresolved: tuple[str, ...] = ()
+    confidence: float = Field(ge=0, le=1)
+    provenance: ModelProvenance
 
     @model_validator(mode="after")
-    def asset_matches_mode(self) -> MusicStrategy:
-        if self.mode == "music_bed" and self.asset_id is None:
-            raise ValueError("music_bed requires an authorized asset_id")
-        if self.mode != "music_bed" and self.asset_id is not None:
-            raise ValueError("music asset_id is only valid for music_bed")
+    def complete_timeline_is_explicit(self) -> EditBlueprint:
+        keys = [item.decision_key for item in self.visuals]
+        keys.extend(item.decision_key for item in self.captions)
+        keys.extend(item.decision_key for item in self.music)
+        keys.extend(item.decision_key for item in self.sound_effects)
+        if len(keys) != len(set(keys)):
+            raise ValueError("Edit Blueprint decision keys must be unique")
+        section_keys = [section.section_key for section in self.sections]
+        if len(section_keys) != len(set(section_keys)):
+            raise ValueError("Edit Blueprint section keys must be unique")
+        sync_keys = [item.sync_key for item in self.audio_visual_sync]
+        if len(sync_keys) != len(set(sync_keys)):
+            raise ValueError("Edit Blueprint sync keys must be unique")
+        if self.captions and self.caption_style is None:
+            raise ValueError("caption decisions require an explicit caption style")
+        if not self.captions and self.caption_style is not None:
+            raise ValueError("caption style requires caption decisions")
+        for item in (
+            *self.sections,
+            *self.visuals,
+            *self.captions,
+            *self.music,
+            *self.sound_effects,
+        ):
+            if item.output.end_frame > self.output_duration_frames:
+                raise ValueError("Edit Blueprint item exceeds output duration")
+        audio_keys = {item.decision_key for item in self.music}
+        audio_keys.update(item.decision_key for item in self.sound_effects)
+        for sync in self.audio_visual_sync:
+            if sync.audio_decision_key not in audio_keys:
+                raise ValueError("audio-visual sync references unknown audio decision")
+            if sync.output_frame >= self.output_duration_frames:
+                raise ValueError("audio-visual sync exceeds output duration")
+        ordered = sorted(self.visuals, key=lambda item: item.output.start_frame)
+        if ordered[0].output.start_frame != 0:
+            raise ValueError("Edit Blueprint primary visuals must start at frame zero")
+        cursor = 0
+        for item in ordered:
+            if item.output.start_frame != cursor:
+                raise ValueError(
+                    "Edit Blueprint primary visuals must be gapless and non-overlapping"
+                )
+            cursor = item.output.end_frame
+        if cursor != self.output_duration_frames:
+            raise ValueError(
+                "Edit Blueprint primary visuals must cover the output duration"
+            )
         return self
 
 
 class FirstCutDecision(ContractModel):
-    """Creative decision returned by a Director provider before Patch building."""
+    """A Director response whose creative choices are fully explicit."""
 
-    moment_ids: tuple[StableId, ...] = Field(min_length=1)
+    decision_version: Literal["2.0"] = "2.0"
     summary: str = Field(min_length=1, max_length=1_000)
     explanation: str = Field(min_length=1, max_length=4_000)
-    creative_strategy: CreativeStrategy = Field(
-        default_factory=lambda: CreativeStrategy(
-            objective="Create a coherent first cut"
-        )
-    )
-    copy_strategy: CopyStrategy = Field(default_factory=CopyStrategy)
-    music_strategy: MusicStrategy = Field(default_factory=MusicStrategy)
+    edit_blueprint: EditBlueprint
 
-    @model_validator(mode="after")
-    def moments_are_unique(self) -> FirstCutDecision:
-        if len(self.moment_ids) != len(set(self.moment_ids)):
-            raise ValueError("first-cut decision contains duplicate moments")
-        return self
+    @property
+    def moment_ids(self) -> tuple[str, ...]:
+        """Stable selection projection used by audit/UI code."""
+
+        return tuple(item.moment_id for item in self.edit_blueprint.visuals)
 
 
 class DirectorReviewIssue(ContractModel):

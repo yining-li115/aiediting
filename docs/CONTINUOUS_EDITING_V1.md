@@ -97,6 +97,8 @@ required for clip-boundary Trim, whole-clip Move, and whole-clip Delete:
 - add a complete music, voiceover, or SFX track from a ready Asset authorized
   for that role, or insert a clip into an existing matching audio track;
 - add a complete `caption.clean@1.0.0` track;
+- replace the project output settings for an explicit canvas orientation or
+  aspect-ratio request;
 - add, edit, retime, delete, or restyle cues on an existing caption track;
 - delete an existing visual or audio clip;
 - set visual or audio output timing;
@@ -124,6 +126,12 @@ Structural edits obey these additional invariants:
 - Crop uses normalized source coordinates and does not change timing. Only
   center Reframe is admitted because face, saliency, and manual Reframe are not
   yet supported by the FFmpeg renderer.
+- Output orientation is a global, non-ripple edit. It must use
+  `set_output_settings`; Crop or Reframe alone cannot claim to change a
+  landscape canvas into portrait. Existing fps, audio sample rate, and color
+  space are preserved unless the user explicitly asks to change them. The same
+  proposal may include Crop or center Reframe operations to adapt shots to the
+  new canvas.
 - Constant Speed preserves the source range, derives a new output duration
   from the exact playback equation, applies the same rate/output mapping to
   matching source audio, and ripples the timeline when duration changes.
@@ -219,8 +227,32 @@ tells the user that the saved Revision needs a render retry. It must not report
 the edit itself as failed after ProjectService has already advanced the head.
 
 The assistant message is generated from the operations that were actually
-committed, includes the resulting Revision identity, and never claims that a
-proposal was applied before ProjectService succeeds.
+committed and never claims that a proposal was applied before ProjectService
+succeeds. It is user-facing product copy: it summarizes the visible result and
+must not expose Revision IDs, service names, schema names, provider traces, or
+other implementation details. The resulting Revision identity remains linked
+structurally on the Message and AgentTurn for history, audit, and recovery.
+
+The browser presents each turn in causal order:
+
+```text
+user request -> collapsible Agent activity -> final assistant summary
+```
+
+The final summary is not shown while its render Job is still active. A
+completed turn must not retain a running/Thinking indicator; a render failure
+is shown in the activity before the saved-edit summary.
+
+Agent activity is an audit-friendly projection of events that actually
+happened, not a canned list of expected stages. The continuous-edit worker
+emits model-decision start, tool start/result, preview-evidence preparation,
+Patch application, commit, and render progress in causal order. Tool events
+carry safe result facts such as the actual search query, result count,
+proposal summary, and operation types. While collapsed, the browser displays
+the latest real action in one muted line; expanding it reveals the ordered
+event history. A completed turn replaces the live action with elapsed time and
+the preview result. The UI must never display a future action, an invented
+percentage, or a generic fixed tool sequence.
 
 ## 7. HTTP and browser behavior
 
@@ -233,6 +265,11 @@ proposal was applied before ProjectService succeeds.
   Revision, and preview identities.
 - The left workspace panel waits for the Agent Job and its preview Job, then
   refreshes the current Revision, history, conversation, and right preview.
+  While those Jobs run, the browser keeps the previous ready preview visible
+  and pauses background project polling. After the new Artifact is ready, the
+  new Revision and its Artifact are loaded before one atomic UI switch; the
+  player must not flash an unrendered Revision or substitute a raw source
+  Asset between versions.
 
 The browser sends the current Revision and the frame currently displayed by a
 revision-bound Preview Player. Full previews map media time from frame zero;
@@ -241,24 +278,34 @@ historical Revision or a source proxy is never attached to a turn against the
 current Revision. The frozen playhead makes phrases such as “here” and “from
 here” resolvable without making player state authoritative.
 
-Preview Annotation v1 adds a `Preview | Preview edit` mode without creating a
+Preview Annotation adds a `Preview | Preview edit` mode without creating a
 second timeline. A user pauses or scrubs a ready current-Revision preview,
-marks one frame or a half-open frame range, writes a comment, and attaches that
-reference to the left-side composer. Each `PreviewAnnotation` carries a stable
-annotation ID, exact Revision ID, ready preview Artifact ID, output frame range,
-and comment. The application rejects missing, non-preview, non-ready,
-cross-Revision, and out-of-artifact references before an AgentTurn is queued.
-Accepted annotations are stored inside the durable `WorkspaceSelection`, frozen
-into `AgentTurnContext`, and displayed with the originating user message.
+marks one frame or a half-open frame range, optionally drags a rectangle over
+the rendered picture, writes a comment, and attaches that reference to the
+left-side composer. Each `PreviewAnnotation` carries a stable annotation ID,
+exact Revision ID, ready preview Artifact ID, output frame range, optional
+normalized rectangle, and comment. Rectangle coordinates are measured against
+the actual video content, excluding player letterbox/pillarbox. The application
+rejects missing, non-preview, non-ready, cross-Revision, out-of-artifact, and
+out-of-picture references before an AgentTurn is queued. Accepted annotations
+are stored inside the durable `WorkspaceSelection`, frozen into
+`AgentTurnContext`, and displayed with the originating user message.
 
 Before model inference, deterministic grounding resolves every annotated range
 to overlapping visual clips, source audio, captions, and graphics. The Director
-may interpret the user's instruction and annotation comment semantically, but
-it cannot turn either into state directly: any resulting edit still requires a
-closed typed Patch, ProjectService validation, a new immutable Revision, and a
-Revision-bound preview. Annotation comments are untrusted user evidence, never
-system instructions. Spatial boxes and freehand pixels are not part of v1;
-v1's reference primitive is exact project time.
+may interpret the user's instruction and annotation comment semantically. For
+a spatial annotation, the Job also extracts the representative midpoint frame
+from the exact immutable preview Artifact and draws the normalized rectangle on
+that frame. The annotated image is supplied to every bounded Director step with
+its annotation ID and absolute Revision frame. Spatial turns fail visibly when
+the configured Director cannot accept images or evidence extraction fails; the
+runtime never silently drops the pixels and falls back to keyword rules.
+
+Neither temporal nor spatial evidence can turn itself into state: any resulting
+edit still requires a closed typed Patch, ProjectService validation, a new
+immutable Revision, and a Revision-bound preview. Annotation comments and image
+pixels are untrusted user evidence, never system instructions. Freehand strokes,
+polygons, masks, and tracked regions remain outside this contract.
 
 `WorkspaceSelection` also defines stable selected target IDs, visible range,
 comparison Revision, and preview inspection frame. Those additional fields
@@ -268,8 +315,7 @@ become active only when the right-side editor exposes real selection state.
 
 The remaining Continuous Editing work is:
 
-1. extend Preview Annotation from temporal ranges to optional spatial regions,
-   then connect real right-side clip/track selection and visible-range state;
+1. connect real right-side clip/track selection and visible-range state;
 2. keep model errors actionable in the browser as providers and prompts evolve;
 3. run a real-model Golden Run for the implemented caption/music operation
    subset, then add transition, graphic, and lock operations

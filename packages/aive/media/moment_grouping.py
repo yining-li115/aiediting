@@ -25,6 +25,16 @@ def validate_grouping(
         raise InvalidMomentGrouping(
             "Moment groups must cover every Shot exactly once in source order"
         )
+    for decision in decisions:
+        cited = {
+            shot_id
+            for citation in decision.understanding.evidence
+            for shot_id in citation.shot_ids
+        }
+        if not cited or not cited.issubset(set(decision.shot_ids)):
+            raise InvalidMomentGrouping(
+                "Moment understanding must cite only Shots in its group"
+            )
 
 
 def attach_transcripts(
@@ -74,52 +84,15 @@ def assemble_groups(
                 member.evidence.analysis_window_count for member in members
             ),
             keyframe_count=sum(member.evidence.keyframe_count for member in members),
-            technical_quality=_weighted(members, "technical_quality"),
-            sharpness=_weighted(members, "sharpness"),
-            exposure_score=_weighted(members, "exposure_score"),
-            stability_score=_weighted(members, "stability_score"),
-            motion_quality=_weighted(members, "motion_quality"),
-            camera_motion=_same_or_unknown(
-                tuple(member.evidence.camera_motion for member in members)
-            ),
-            is_usable=any(member.evidence.is_usable for member in members),
-            reject_reason=(
-                None
-                if any(member.evidence.is_usable for member in members)
-                else "; ".join(
-                    filter(
-                        None,
-                        (member.evidence.reject_reason for member in members),
+            understanding=decision.understanding.model_copy(
+                update={
+                    "audio_understanding": tuple(
+                        audio
+                        for member in members
+                        for audio in member.evidence.understanding.audio_understanding
                     )
-                )[:256]
-                or None
+                }
             ),
-            semantic_status="ready",
-            semantic=decision.semantic,
-            semantic_role=decision.semantic_role,
-            shot_type=_same_or_unknown(
-                tuple(member.evidence.shot_type for member in members)
-            ),
-            people=max(
-                (
-                    member.evidence.people
-                    for member in members
-                    if member.evidence.people is not None
-                ),
-                default=None,
-            ),
-            emotion=tuple(
-                dict.fromkeys(
-                    emotion
-                    for member in members
-                    for emotion in member.evidence.emotion
-                )
-            ),
-            interestingness=_weighted(members, "interestingness"),
-            composition_score=_weighted(members, "composition_score"),
-            provider=provenance.get("provider"),
-            model=provenance.get("model"),
-            prompt_version=provenance.get("prompt_version"),
             transcript_segment_ids=tuple(
                 item.evidence.transcript_id for item in related
             ),
@@ -189,25 +162,6 @@ def _transcript_text(
 ) -> str | None:
     text = " ".join(item.evidence.text.strip() for item in transcripts).strip()
     return text[:20_000] or None
-
-
-def _weighted(
-    moments: tuple[PersistedMoment, ...], field: str
-) -> float | None:
-    values: list[tuple[float, int]] = []
-    for moment in moments:
-        value = getattr(moment.evidence, field)
-        if value is not None:
-            duration = moment.evidence.source.end - moment.evidence.source.start
-            values.append((float(value), duration))
-    if not values:
-        return None
-    total = sum(duration for _, duration in values)
-    return round(sum(value * duration for value, duration in values) / total, 4)
-
-
-def _same_or_unknown(values: tuple[str, ...]) -> str:
-    return values[0] if values and len(set(values)) == 1 else "unknown"
 
 
 def _combined_vector(

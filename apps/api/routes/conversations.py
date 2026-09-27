@@ -18,7 +18,12 @@ from aive.db.conversation_repository import SqlAlchemyConversationRepository
 from aive.db.media_repository import SqlAlchemyMediaAssetRepository
 from aive.db.session import get_session_factory
 from aive.jobs import JobRunner
+from aive.media.audio_asset_analysis import AudioAssetAnalysisApplication
+from aive.providers import get_provider
 from aive.rendering import RevisionRenderApplication
+from aive.rendering.annotations import OpenCVPreviewAnnotationEvidenceExtractor
+from aive.roles import Role
+from aive.storage import get_storage
 
 from .director import get_video_agent_harness
 from .project_revisions import get_project_revision_application
@@ -39,6 +44,12 @@ def get_conversation_application(
         rendering=get_revision_render_application(),
         harness=harness,
         assets=SqlAlchemyMediaAssetRepository(sessions),
+        audio_assets=AudioAssetAnalysisApplication(
+            storage=get_storage(),
+            assets=SqlAlchemyMediaAssetRepository(sessions),
+            provider=get_provider(Role.AUDIO),
+        ),
+        annotation_evidence=OpenCVPreviewAnnotationEvidenceExtractor(),
     )
 
 

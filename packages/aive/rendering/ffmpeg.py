@@ -30,10 +30,9 @@ from ..contracts.timeline import (
     VideoClip,
     VideoTrack,
 )
-from ..renderer.base import RenderResult
-from ..renderer.ffmpeg import FFmpegError, _run, has_audio_stream, probe_duration
-from ..renderer.profiles import Quality
 from .captions import CaptionRasterError, rasterize_clean_caption
+from .media import FFmpegError, _run, has_audio_stream, probe_duration
+from .provider import Quality, RenderResult
 
 
 class ProjectRenderUnsupported(FFmpegError):

@@ -20,7 +20,7 @@ from ..jobs import Stage
 from ..media.repository import AssetProcessingRecord, MediaAssetRepository
 from ..project.hashing import canonical_model_hash
 from ..project.repository import RevisionRepository
-from ..specs.base import new_id
+from ..ids import new_id
 from ..storage import RENDER, StorageProvider, project_key
 from .provider import ProjectRendererProvider
 from .repository import RenderArtifactNotFound, RenderRepository

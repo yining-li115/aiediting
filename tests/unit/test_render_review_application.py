@@ -7,10 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from aive.agent.harness import VideoAgentHarness
-from aive.agent.render_review import (
-    OfflineRenderReviewerProvider,
-    RenderReviewEngine,
-)
+from aive.agent.render_review import RenderReviewEngine
 from aive.agent.render_review_application import RenderReviewApplication
 from aive.contracts.project_doc import (
     DependencyRef,
@@ -28,7 +25,10 @@ from aive.db.render_repository import SqlAlchemyRenderRepository
 from aive.jobs import JobRunner
 from aive.project.hashing import canonical_model_hash
 from aive.storage import LocalStorage
-from tests.provider_fakes import FixtureFirstCutDirectorProvider
+from tests.provider_fakes import (
+    FixtureFirstCutDirectorProvider,
+    FixtureRenderReviewerProvider,
+)
 
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -46,9 +46,6 @@ class FakeInspector:
                 has_video=True,
                 has_audio=False,
                 sampled_frame_count=5,
-                black_frame_ratio=0,
-                flat_frame_ratio=0,
-                mean_sharpness=0.8,
             ),
             (),
         )
@@ -131,7 +128,7 @@ def test_render_review_application_persists_context_and_report(tmp_path) -> None
         provider=FixtureFirstCutDirectorProvider(),
         render_review_engine=RenderReviewEngine(
             inspector=FakeInspector(),
-            provider=OfflineRenderReviewerProvider(),
+            provider=FixtureRenderReviewerProvider(),
         ),
     )
     application = RenderReviewApplication(
@@ -150,4 +147,4 @@ def test_render_review_application_persists_context_and_report(tmp_path) -> None
     assert reviewed.review_status == "accepted"
     assert reviewed.review_context is not None
     assert reviewed.review is not None
-    assert reviewed.review.visual_review_performed is False
+    assert reviewed.review.visual_review_performed is True

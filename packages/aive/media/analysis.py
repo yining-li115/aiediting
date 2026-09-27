@@ -15,19 +15,22 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.moments import (
+    AudioEvidence,
+    AudioUnderstanding,
     DetectedShot,
+    MediaEvidence,
     MediaSourceSpan,
     MomentEvidence,
     ShotObservation,
+    SourceUnderstanding,
     TranscriptEvidence,
 )
 from ..jobs import Stage
-from ..material import keyframes, quality, split, usability
+from ..material import keyframes, split
 from ..material.embedding import segment_vector, to_blob
 from ..providers import Role, capture_provenance, get_provider
-from ..specs.base import new_id
-from ..specs.segment import RawSegment
-from ..storage import KEYFRAME, StorageProvider, project_key
+from ..ids import new_id
+from ..storage import ANALYSIS_AUDIO, KEYFRAME, StorageProvider, project_key
 from .analysis_repository import (
     AnalysisAssetRecord,
     MediaAnalysisRepository,
@@ -121,8 +124,6 @@ class MediaAnalysisApplication:
         storage: StorageProvider,
         repository: MediaAnalysisRepository,
         shot_detector: Callable[[Path], list[tuple[float, float]]] = split.detect_boundaries,
-        video_quality: Callable[[str, float, float], quality.QualityMetrics] = quality.measure,
-        photo_quality: Callable[[str], quality.QualityMetrics] = quality.measure_photo,
         keyframe_extractor: Callable[
             [str, list[float], list[Path]], list[Path]
         ] = keyframes.extract_at_offsets,
@@ -135,8 +136,6 @@ class MediaAnalysisApplication:
         self._storage = storage
         self._repository = repository
         self._shot_detector = shot_detector
-        self._video_quality = video_quality
-        self._photo_quality = photo_quality
         self._keyframe_extractor = keyframe_extractor
         self._audio_extractor = audio_extractor
         self._provider_factory = provider_factory
@@ -253,15 +252,10 @@ class MediaAnalysisApplication:
             )
         source = self._storage.open_local(record.proxy_key or record.storage_key)
         spans = await self._detect_spans(record, source)
-        material = self._provider_factory(Role.MATERIAL, record.project_id)
-        embedding = self._provider_factory(Role.EMBEDDING, record.project_id)
         shots: list[DetectedShot] = []
-        shot_moments: list[PersistedMoment] = []
-        errors: list[str] = []
 
         for ordinal, (start, end) in enumerate(spans):
             shot_id = f"{record.asset_id}_shot_{ordinal:04d}"
-            moment_id = f"{record.asset_id}_moment_{ordinal:04d}"
             source_span = _source_span(start, end)
             shot = DetectedShot(
                 shot_id=shot_id,
@@ -279,55 +273,68 @@ class MediaAnalysisApplication:
                 start=start,
                 end=end,
             )
-            moment, moment_errors = await self._analyze_shot(
-                record,
-                source,
-                shot,
-                moment_id,
-                start,
-                end,
-                material,
-                embedding,
-            )
-            shot_moments.append(moment)
-            errors.extend(moment_errors)
 
-        transcripts, transcript_errors = await self._transcribe_asset(
+        transcripts = await self._transcribe_asset(
             record,
             tuple(shots),
             handle,
         )
-        errors.extend(transcript_errors)
-        moments, grouping_errors = await self._group_asset_moments(
+        material = self._provider_factory(Role.MATERIAL, record.project_id)
+        embedding = self._provider_factory(Role.EMBEDDING, record.project_id)
+        audio_understanding = (
+            self._provider_factory(Role.AUDIO, record.project_id)
+            if record.kind == "video" and record.has_audio
+            else None
+        )
+        shot_moments: list[PersistedMoment] = []
+        for shot in shots:
+            start = shot.source.start / shot.source.timescale
+            end = shot.source.end / shot.source.timescale
+            shot_moments.append(
+                await self._analyze_shot(
+                    record,
+                    source,
+                    shot,
+                    f"{record.asset_id}_moment_{shot.ordinal:04d}",
+                    start,
+                    end,
+                    transcripts,
+                    material,
+                    embedding,
+                    audio_understanding,
+                )
+            )
+
+        moments = await self._group_asset_moments(
             record,
             tuple(shot_moments),
             transcripts,
             material,
         )
-        errors.extend(grouping_errors)
         for moment in moments:
             handle.emit(
                 "moment_analyzed",
                 asset_id=record.asset_id,
                 moment_id=moment.evidence.moment_id,
-                semantic_status=moment.evidence.semantic_status,
+                worth_using=moment.evidence.understanding.worth_using,
+                confidence=moment.evidence.understanding.confidence,
             )
-        return tuple(shots), moments, transcripts, errors
+        return tuple(shots), moments, transcripts, []
 
     async def _transcribe_asset(
         self,
         record: AnalysisAssetRecord,
         shots: tuple[DetectedShot, ...],
         handle: ProgressReporter,
-    ) -> tuple[tuple[PersistedTranscript, ...], list[str]]:
+    ) -> tuple[PersistedTranscript, ...]:
         if record.kind != "video" or not record.has_audio:
-            return (), []
+            return ()
 
         source = self._storage.open_local(record.storage_key)
         provider = self._provider_factory(Role.ASR, record.project_id)
         transcripts: list[PersistedTranscript] = []
-        errors: list[str] = []
         ordinal = 0
+        window_ordinal = 0
         for shot in shots:
             shot_start = shot.source.start / shot.source.timescale
             shot_end = shot.source.end / shot.source.timescale
@@ -335,6 +342,7 @@ class MediaAnalysisApplication:
                 temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 audio_path = Path(temporary.name)
                 temporary.close()
+                published_key: str | None = None
                 try:
                     await asyncio.to_thread(
                         self._audio_extractor,
@@ -343,8 +351,32 @@ class MediaAnalysisApplication:
                         window_end,
                         audio_path,
                     )
-                    with capture_provenance() as provenance:
-                        drafts = await provider.transcribe(audio_path)
+                    if getattr(provider, "requires_remote_url", False):
+                        published_key = project_key(
+                            record.project_id,
+                            ANALYSIS_AUDIO,
+                            (
+                                f"{handle.job_id}-{record.asset_id}-"
+                                f"{window_ordinal:04d}.wav"
+                            ),
+                        )
+                        self._storage.put(audio_path, published_key)
+                        source_url = self._storage.url(published_key)
+                        if source_url is None:
+                            raise MediaAnalysisBatchFailed(
+                                "the selected ASR provider requires a remotely "
+                                "fetchable audio URL, but the configured storage "
+                                "backend cannot publish one; configure private TOS "
+                                "with short-lived signed URLs"
+                            )
+                        with capture_provenance() as provenance:
+                            drafts = await provider.transcribe(
+                                audio_path,
+                                source_url=source_url,
+                            )
+                    else:
+                        with capture_provenance() as provenance:
+                            drafts = await provider.transcribe(audio_path)
                     window_duration = window_end - window_start
                     for draft in drafts:
                         relative_start = min(
@@ -389,15 +421,12 @@ class MediaAnalysisApplication:
                             start=evidence.source.start,
                             end=evidence.source.end,
                         )
-                except Exception as exc:  # retain visual analysis when ASR fails
-                    message = (
-                        f"ASR {record.asset_id} {window_start:.3f}-{window_end:.3f}: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    errors.append(message[:2_000])
                 finally:
+                    if published_key is not None:
+                        self._storage.delete(published_key)
                     audio_path.unlink(missing_ok=True)
-        return tuple(transcripts), errors
+                    window_ordinal += 1
+        return tuple(transcripts)
 
     async def _group_asset_moments(
         self,
@@ -405,43 +434,33 @@ class MediaAnalysisApplication:
         shot_moments: tuple[PersistedMoment, ...],
         transcripts: tuple[PersistedTranscript, ...],
         material: Any,
-    ) -> tuple[tuple[PersistedMoment, ...], list[str]]:
-        fallback = attach_transcripts(shot_moments, transcripts)
+    ) -> tuple[PersistedMoment, ...]:
+        transcript_enriched_shots = attach_transcripts(shot_moments, transcripts)
         if len(shot_moments) <= 1:
-            return fallback, []
+            return transcript_enriched_shots
         if not hasattr(material, "group_moments"):
-            return fallback, [
-                f"Moment grouping {record.asset_id}: provider does not support grouping"
-            ]
+            raise MediaAnalysisBatchFailed(
+                f"material provider cannot group Moments for {record.asset_id!r}"
+            )
 
         observations = tuple(
             ShotObservation(
                 shot_id=moment.evidence.shot_ids[0],
                 source=moment.evidence.source,
-                visual_semantic=moment.evidence.semantic,
-                semantic_role=moment.evidence.semantic_role,
+                understanding=moment.evidence.understanding,
                 transcript=(enriched.evidence.asr_text or "")[:10_000] or None,
             )
-            for moment, enriched in zip(shot_moments, fallback)
+            for moment, enriched in zip(shot_moments, transcript_enriched_shots)
         )
-        try:
-            with capture_provenance() as provenance:
-                decisions = await material.group_moments(observations)
-            return (
-                assemble_groups(
-                    record.asset_id,
-                    decisions,
-                    shot_moments,
-                    transcripts,
-                    provenance,
-                ),
-                [],
-            )
-        except Exception as exc:  # valid singleton Moments remain searchable
-            message = (
-                f"Moment grouping {record.asset_id}: {type(exc).__name__}: {exc}"
-            )
-            return fallback, [message[:2_000]]
+        with capture_provenance() as provenance:
+            decisions = await material.group_moments(observations)
+        return assemble_groups(
+            record.asset_id,
+            decisions,
+            shot_moments,
+            transcripts,
+            provenance,
+        )
 
     async def _detect_spans(
         self, record: AnalysisAssetRecord, source: Path
@@ -465,75 +484,62 @@ class MediaAnalysisApplication:
         moment_id: str,
         start: float,
         end: float,
+        transcripts: tuple[PersistedTranscript, ...],
         material: Any,
         embedding: Any,
-    ) -> tuple[PersistedMoment, list[str]]:
-        metrics = await asyncio.to_thread(
-            self._photo_quality if record.kind == "photo" else self._video_quality,
-            str(source),
-            *(() if record.kind == "photo" else (start, end)),
-        )
-        is_usable, reject_reason = usability.judge(
-            end - start, metrics, record.kind
-        )
+        audio_understanding: Any | None,
+    ) -> PersistedMoment:
         windows = analysis_windows(start, end)
         frame_paths, frame_keys = await self._representative_frames(
             record, source, moment_id, windows
         )
-        semantic_status = "skipped" if not is_usable else "ready"
-        semantic_error = None
-        semantic = None
-        semantic_role = "unknown"
-        shot_type = "unknown"
-        people = None
-        emotion: tuple[str, ...] = ()
-        interestingness = metrics.technical_quality
-        composition_score = None
-        provenance: dict[str, Any] = {}
-        errors: list[str] = []
-
-        raw = RawSegment(
-            segment_id=moment_id,
+        related = tuple(
+            item
+            for item in transcripts
+            if item.evidence.source.end > shot.source.start
+            and item.evidence.source.start < shot.source.end
+        )
+        evidence_packet = MediaEvidence(
+            evidence_id=f"{moment_id}_evidence",
             project_id=record.project_id,
             asset_id=record.asset_id,
-            kind=record.kind,
-            start=start,
-            end=end,
+            asset_kind=record.kind,
+            source=shot.source,
+            shot_ids=(shot.shot_id,),
+            sample_ids=frame_keys,
+            transcript_segment_ids=tuple(
+                item.evidence.transcript_id for item in related
+            ),
+            transcript_text=_transcript_text(related),
+            width=record.width,
+            height=record.height,
+            fps=record.fps,
+            has_audio=record.has_audio,
         )
-        if is_usable:
-            try:
-                with capture_provenance() as evidence:
-                    analyzed = await material.analyze_segment(raw, frame_paths, None)
-                provenance = dict(evidence)
-                semantic = analyzed.semantic
-                semantic_role = analyzed.semantic_role
-                shot_type = analyzed.shot_type
-                people = analyzed.people
-                emotion = tuple(analyzed.emotion)
-                interestingness = analyzed.interestingness
-                composition_score = analyzed.composition_score
-                if analyzed.reject_reason:
-                    is_usable = False
-                    reject_reason = analyzed.reject_reason
-            except Exception as exc:  # model failure preserves deterministic evidence
-                semantic_status = "failed"
-                semantic_error = f"{type(exc).__name__}: {exc}"[:2_000]
-                errors.append(f"{moment_id}: {semantic_error}")
+        audio_findings = await self._understand_audio_span(
+            record,
+            shot,
+            related,
+            audio_understanding,
+        )
+        with capture_provenance() as provenance:
+            understanding = await material.understand_source(
+                evidence_packet,
+                frame_paths,
+                None,
+            )
+        if audio_findings:
+            understanding = understanding.model_copy(
+                update={"audio_understanding": audio_findings}
+            )
+        _validate_understanding(understanding, evidence_packet)
 
-        vector_blob = None
-        vector_dim = None
-        if frame_paths:
-            try:
-                frame_vectors = await embedding.embed_images(frame_paths)
-                vector = segment_vector(frame_vectors)
-                if vector.size:
-                    vector_blob = to_blob(vector)
-                    vector_dim = int(vector.size)
-            except Exception as exc:  # retrieval may be retried without losing Moments
-                message = f"embedding {moment_id}: {type(exc).__name__}: {exc}"
-                errors.append(message[:2_000])
+        frame_vectors = await embedding.embed_images(frame_paths)
+        vector = segment_vector(frame_vectors)
+        vector_blob = to_blob(vector) if vector.size else None
+        vector_dim = int(vector.size) if vector.size else None
 
-        evidence = MomentEvidence(
+        moment_evidence = MomentEvidence(
             moment_id=moment_id,
             project_id=record.project_id,
             asset_id=record.asset_id,
@@ -542,35 +548,57 @@ class MediaAnalysisApplication:
             source=shot.source,
             analysis_window_count=len(windows),
             keyframe_count=len(frame_keys),
-            technical_quality=metrics.technical_quality,
-            sharpness=metrics.sharpness,
-            exposure_score=metrics.exposure_score,
-            stability_score=metrics.stability_score,
-            motion_quality=metrics.motion_quality,
-            camera_motion=metrics.camera_motion,
-            is_usable=is_usable,
-            reject_reason=reject_reason,
-            semantic_status=semantic_status,
-            semantic=semantic,
-            semantic_role=semantic_role,
-            shot_type=shot_type,
-            people=people,
-            emotion=emotion,
-            interestingness=interestingness,
-            composition_score=composition_score,
-            semantic_error=semantic_error,
-            provider=provenance.get("provider"),
-            model=provenance.get("model"),
-            prompt_version=provenance.get("prompt_version"),
+            understanding=understanding,
+            transcript_segment_ids=evidence_packet.transcript_segment_ids,
+            has_speech=bool(related),
+            asr_text=evidence_packet.transcript_text,
         )
         return PersistedMoment(
-            evidence=evidence,
+            evidence=moment_evidence,
             keyframe_keys=frame_keys,
             raw_response=provenance.get("raw_response"),
             embedding=vector_blob,
             embedding_dim=vector_dim,
-            analyzed_at=datetime.now(timezone.utc) if semantic_status == "ready" else None,
-        ), errors
+            analyzed_at=datetime.now(timezone.utc),
+        )
+
+    async def _understand_audio_span(
+        self,
+        record: AnalysisAssetRecord,
+        shot: DetectedShot,
+        transcripts: tuple[PersistedTranscript, ...],
+        provider: Any | None,
+    ) -> tuple[AudioUnderstanding, ...]:
+        if provider is None:
+            return ()
+        source = self._storage.open_local(record.storage_key)
+        start = shot.source.start / shot.source.timescale
+        end = shot.source.end / shot.source.timescale
+        temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        audio_path = Path(temporary.name)
+        temporary.close()
+        try:
+            await asyncio.to_thread(
+                self._audio_extractor,
+                source,
+                start,
+                end,
+                audio_path,
+            )
+            evidence = AudioEvidence(
+                evidence_id=f"{shot.shot_id}_audio_evidence",
+                project_id=record.project_id,
+                asset_id=record.asset_id,
+                source=shot.source,
+                transcript_segment_ids=tuple(
+                    item.evidence.transcript_id for item in transcripts
+                ),
+                transcript_text=_transcript_text(transcripts),
+            )
+            finding = await provider.understand_audio(evidence, audio_path)
+            return (finding,)
+        finally:
+            audio_path.unlink(missing_ok=True)
 
     async def _representative_frames(
         self,
@@ -611,3 +639,42 @@ def _source_span(start: float, end: float) -> MediaSourceSpan:
     start_tick = max(0, round(start * TIMESCALE))
     end_tick = max(start_tick + 1, round(end * TIMESCALE))
     return MediaSourceSpan(start=start_tick, end=end_tick, timescale=TIMESCALE)
+
+
+def _transcript_text(
+    transcripts: tuple[PersistedTranscript, ...],
+) -> str | None:
+    text = " ".join(item.evidence.text.strip() for item in transcripts).strip()
+    return text[:20_000] or None
+
+
+def _validate_understanding(
+    understanding: SourceUnderstanding,
+    supplied: MediaEvidence,
+) -> None:
+    allowed_shots = set(supplied.shot_ids)
+    for citation in understanding.evidence:
+        if citation.evidence_id != supplied.evidence_id:
+            raise MediaAnalysisBatchFailed(
+                "source model cited evidence that was not supplied"
+            )
+        if set(citation.shot_ids) - allowed_shots:
+            raise MediaAnalysisBatchFailed(
+                "source model cited a Shot that was not supplied"
+            )
+        if citation.source is not None and (
+            citation.source.timescale != supplied.source.timescale
+            or citation.source.start < supplied.source.start
+            or citation.source.end > supplied.source.end
+        ):
+            raise MediaAnalysisBatchFailed(
+                "source model cited a range outside the supplied evidence"
+            )
+    for audio in understanding.audio_understanding:
+        if audio.source.timescale != supplied.source.timescale or (
+            audio.source.start < supplied.source.start
+            or audio.source.end > supplied.source.end
+        ):
+            raise MediaAnalysisBatchFailed(
+                "audio model cited a range outside the supplied evidence"
+            )

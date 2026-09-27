@@ -180,12 +180,16 @@ resolved stable target ID belongs in the resulting Patch.
 Every preview and export names the exact revision it consumes. A newer commit
 does not relabel an older Artifact.
 
-Preview annotations are revision-bound workspace evidence, not edit state. A
-temporal annotation names the ready preview Artifact, its Revision, an exact
-frame range, and the user's comment. It may be persisted with the Conversation
-and frozen into an AgentTurnContext, but it never mutates ProjectDoc. The
-application validates the reference and resolves its overlapping timeline IDs;
-only a later typed Patch may create a new Revision.
+Preview annotations are revision-bound workspace evidence, not edit state. An
+annotation names the ready preview Artifact, its Revision, an exact frame
+range, the user's comment, and optionally a normalized rectangle inside the
+rendered picture. It may be persisted with the Conversation and frozen into an
+AgentTurnContext, but it never mutates ProjectDoc. The application validates
+the reference and resolves its overlapping timeline IDs. Spatial annotations
+add one representative frame extracted from that exact Artifact to the
+image-capable Director input; failure to extract or deliver that evidence fails
+the turn instead of pretending the model saw it. Only a later typed Patch may
+create a new Revision.
 
 Immediate edits may commit after validation and then render. Expensive or
 high-impact Agent edits may render a validated candidate first and wait for

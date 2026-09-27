@@ -12,7 +12,8 @@ from .ffmpeg import (
     ProjectDocFFmpegRenderer,
     ProjectRenderUnsupported,
 )
-from .provider import ProjectRendererProvider
+from .media import FFmpegError, has_audio_stream, probe, probe_duration, run_ffmpeg
+from .provider import ProjectRendererProvider, Quality, RenderResult
 from .remotion import ProjectDocRemotionRenderer
 from .repository import (
     RenderArtifactNotFound,
@@ -33,6 +34,13 @@ __all__ = [
     "ProjectDocRemotionRenderer",
     "ProjectRendererProvider",
     "ProjectRenderUnsupported",
+    "FFmpegError",
+    "Quality",
+    "RenderResult",
+    "has_audio_stream",
+    "probe",
+    "probe_duration",
+    "run_ffmpeg",
     "referenced_asset_ids",
     "referenced_audio_asset_ids",
     "RenderArtifactNotFound",

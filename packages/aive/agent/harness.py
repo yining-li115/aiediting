@@ -6,7 +6,9 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from ..contracts.audio import AudioAssetAnalysis
 from ..contracts.conversation import (
+    AgentToolCall,
     AgentToolStep,
     AgentTurnContext,
     ConversationMessage,
@@ -31,6 +33,7 @@ from .pipeline import (
     DirectorReviewRejected,
     MAX_AUTOFIX_ATTEMPTS,
 )
+from .preview_evidence import PreviewAnnotationImage
 from .provider import DirectorProvider
 from .render_review import RenderReviewEngine, RenderReviewOutcome
 from .render_autofix import (
@@ -38,13 +41,15 @@ from .render_autofix import (
     RenderAutoFixOutcome,
     RenderAutoFixPipeline,
 )
-from .review import FirstCutReviewer
+from .review import CreativePlanReviewerProvider, FirstCutReviewer
 from .tools import ComponentAgentTools
+from ..providers.roles import RerankProvider
 from .turn_context import (
     BASE_CONTINUOUS_EDIT_TOOLS,
     CONTINUOUS_EDIT_TOOLS,
     AgentTurnContextBuilder,
 )
+from ..contracts.style_reference import StyleReferenceBlueprint
 
 
 class VideoAgentHarness:
@@ -62,8 +67,10 @@ class VideoAgentHarness:
         context_builder: AgentRunContextBuilder | None = None,
         turn_context_builder: AgentTurnContextBuilder | None = None,
         reviewer: FirstCutReviewer | None = None,
+        creative_reviewer: CreativePlanReviewerProvider | None = None,
         render_review_engine: RenderReviewEngine | None = None,
         component_tools: ComponentAgentTools | None = None,
+        moment_search_provider: RerankProvider | None = None,
         max_repair_attempts: int = MAX_AUTOFIX_ATTEMPTS,
         max_render_autofix_attempts: int = MAX_RENDER_AUTOFIX_ATTEMPTS,
     ) -> None:
@@ -80,9 +87,10 @@ class VideoAgentHarness:
         self._first_cut = DirectorPipeline(
             provider=provider,
             reviewer=decision_reviewer,
+            creative_reviewer=creative_reviewer,
             max_repair_attempts=max_repair_attempts,
         )
-        self._render_review = render_review_engine or RenderReviewEngine()
+        self._render_review = render_review_engine
         self._render_autofix = RenderAutoFixPipeline(
             provider=provider,
             reviewer=decision_reviewer,
@@ -91,6 +99,7 @@ class VideoAgentHarness:
         self._continuous_edit = ContinuousEditPipeline(
             provider,
             component_tools=component_tools,
+            moment_search_provider=moment_search_provider,
         )
 
     @property
@@ -103,10 +112,14 @@ class VideoAgentHarness:
 
     @property
     def render_reviewer_name(self) -> str:
+        if self._render_review is None:
+            raise RuntimeError("render Reviewer is not configured")
         return self._render_review.provider_name
 
     @property
     def render_reviewer_version(self) -> str:
+        if self._render_review is None:
+            raise RuntimeError("render Reviewer is not configured")
         return self._render_review.provider_version
 
     def build_context(
@@ -115,6 +128,8 @@ class VideoAgentHarness:
         revision: ProjectRevision,
         asset_statuses: tuple[AssetProcessingRecord, ...],
         moments: tuple[MomentEvidence, ...],
+        style_reference_blueprints: tuple[StyleReferenceBlueprint, ...] = (),
+        audio_asset_analyses: tuple[AudioAssetAnalysis, ...] = (),
     ) -> AgentRunContext:
         """Build the frozen, project-scoped evidence for one Agent run."""
 
@@ -122,6 +137,8 @@ class VideoAgentHarness:
             revision=revision,
             asset_statuses=asset_statuses,
             moments=moments,
+            style_reference_blueprints=style_reference_blueprints,
+            audio_asset_analyses=audio_asset_analyses,
         )
 
     def build_turn_context(
@@ -148,14 +165,20 @@ class VideoAgentHarness:
         context: AgentTurnContext,
         *,
         existing_steps: tuple[AgentToolStep, ...] = (),
+        on_model_start: Callable[[int], None] | None = None,
+        on_tool_start: Callable[[int, AgentToolCall], None] | None = None,
         on_step: Callable[[AgentToolStep], None] | None = None,
         proposal_validator: Callable[[PatchProposal], None] | None = None,
+        annotation_images: tuple[PreviewAnnotationImage, ...] = (),
     ) -> ContinuousEditOutcome:
         return await self._continuous_edit.run(
             context,
             existing_steps=existing_steps,
+            on_model_start=on_model_start,
+            on_tool_start=on_tool_start,
             on_step=on_step,
             proposal_validator=proposal_validator,
+            annotation_images=annotation_images,
         )
 
     def can_autofix_render(
@@ -216,6 +239,8 @@ class VideoAgentHarness:
     ) -> RenderReviewOutcome:
         """Review one exact ready Artifact without mutating project state."""
 
+        if self._render_review is None:
+            raise RuntimeError("render Reviewer is not configured")
         return await self._render_review.review(
             revision=revision,
             artifact=artifact,

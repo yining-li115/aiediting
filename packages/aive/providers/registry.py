@@ -15,45 +15,12 @@ from typing import Any, Callable
 
 from ..model_registry import ModelCard, card_for
 from .base import BaseProvider, Role
-from .mock import (
-    MockAgentProvider,
-    MockASRProvider,
-    MockEmbeddingProvider,
-    MockIntentProvider,
-    MockMaterialProvider,
-    MockPlannerProvider,
-    MockReferenceProvider,
-    MockRerankProvider,
-    PassthroughCritic,
-)
 
 Factory = Callable[..., BaseProvider]
 
 # (adapter, role) -> client class. Adapters are implementations; models are
 # configuration. A new vendor on an existing adapter needs no entry here.
-_ADAPTERS: dict[tuple[str, Role], Factory] = {
-    ("mock", Role.MATERIAL): MockMaterialProvider,
-    ("mock", Role.REFERENCE): MockReferenceProvider,
-    ("mock", Role.INTENT): MockIntentProvider,
-    ("mock", Role.PLANNER): MockPlannerProvider,
-    ("mock", Role.EMBEDDING): MockEmbeddingProvider,
-    ("mock", Role.RERANK): MockRerankProvider,
-    ("mock", Role.AGENT_FAST): MockAgentProvider,
-    ("mock", Role.AGENT_DEEP): MockAgentProvider,
-    ("mock", Role.ASR): MockASRProvider,
-    ("passthrough", Role.CRITIC): PassthroughCritic,
-}
-
-
-def _offline_render_reviewer_factory(**kwargs: Any) -> BaseProvider:
-    from ..agent.render_review import (  # noqa: PLC0415
-        OfflineRenderReviewerProvider,
-    )
-
-    return OfflineRenderReviewerProvider(**kwargs)
-
-
-_ADAPTERS[("mock", Role.REVIEWER)] = _offline_render_reviewer_factory
+_ADAPTERS: dict[tuple[str, Role], Factory] = {}
 
 
 def _openai_compatible_factory(role: Role):
@@ -61,14 +28,16 @@ def _openai_compatible_factory(role: Role):
 
     def factory(card: ModelCard | None = None, **kwargs: Any) -> BaseProvider:
         from .openai_compatible import (  # noqa: PLC0415
-            OpenAICompatibleCriticProvider,
             OpenAICompatibleASRProvider,
-            OpenAICompatibleIntentProvider,
+            OpenAICompatibleAudioProvider,
             OpenAICompatibleMaterialProvider,
-            OpenAICompatiblePlannerProvider,
+            OpenAICompatibleRerankProvider,
+            OpenAICompatibleStyleProvider,
         )
+        from .gemini import GeminiNativeStyleProvider  # noqa: PLC0415
         from ..agent.provider import (  # noqa: PLC0415
             OpenAICompatibleDirectorProvider,
+            OpenAICompatibleRenderReviewerProvider,
             VolcanoDirectorProvider,
             VolcanoRenderReviewerProvider,
         )
@@ -81,15 +50,20 @@ def _openai_compatible_factory(role: Role):
 
         classes = {
             Role.MATERIAL: OpenAICompatibleMaterialProvider,
-            Role.REFERENCE: OpenAICompatibleMaterialProvider,
-            Role.INTENT: OpenAICompatibleIntentProvider,
-            Role.PLANNER: OpenAICompatiblePlannerProvider,
-            Role.AGENT_FAST: OpenAICompatiblePlannerProvider,
-            Role.AGENT_DEEP: OpenAICompatiblePlannerProvider,
-            Role.CRITIC: OpenAICompatibleCriticProvider,
+            Role.STYLE: (
+                GeminiNativeStyleProvider
+                if card.vendor == "google"
+                else OpenAICompatibleStyleProvider
+            ),
             Role.ASR: OpenAICompatibleASRProvider,
+            Role.AUDIO: OpenAICompatibleAudioProvider,
+            Role.RERANK: OpenAICompatibleRerankProvider,
             Role.DIRECTOR: director_class,
-            Role.REVIEWER: VolcanoRenderReviewerProvider,
+            Role.REVIEWER: (
+                VolcanoRenderReviewerProvider
+                if card.vendor == "bytedance-volcengine"
+                else OpenAICompatibleRenderReviewerProvider
+            ),
         }
         assert card is not None, "openai_compatible needs its ModelCard"
         return classes[role](card=card, **kwargs)
@@ -99,15 +73,12 @@ def _openai_compatible_factory(role: Role):
 
 for _role in (
     Role.MATERIAL,
-    Role.REFERENCE,
-    Role.INTENT,
-    Role.PLANNER,
-    Role.CRITIC,
-    Role.AGENT_FAST,
-    Role.AGENT_DEEP,
+    Role.STYLE,
     Role.DIRECTOR,
     Role.REVIEWER,
     Role.ASR,
+    Role.AUDIO,
+    Role.RERANK,
 ):
     _ADAPTERS[("openai_compatible", _role)] = _openai_compatible_factory(_role)
 
@@ -120,6 +91,34 @@ def _local_openclip_factory(**kwargs: Any) -> BaseProvider:
 
 
 _ADAPTERS[("local_openclip", Role.EMBEDDING)] = _local_openclip_factory
+
+
+def _volcengine_embedding_factory(
+    card: ModelCard | None = None,
+    **kwargs: Any,
+) -> BaseProvider:
+    from .volcengine import (  # noqa: PLC0415
+        VolcengineMultimodalEmbeddingProvider,
+    )
+
+    assert card is not None, "volcengine_embedding needs its ModelCard"
+    return VolcengineMultimodalEmbeddingProvider(card=card, **kwargs)
+
+
+def _volcengine_seed_asr_factory(
+    card: ModelCard | None = None,
+    **kwargs: Any,
+) -> BaseProvider:
+    from .volcengine import VolcengineSeedASRProvider  # noqa: PLC0415
+
+    assert card is not None, "volcengine_seed_asr needs its ModelCard"
+    return VolcengineSeedASRProvider(card=card, **kwargs)
+
+
+_ADAPTERS[("volcengine_embedding", Role.EMBEDDING)] = (
+    _volcengine_embedding_factory
+)
+_ADAPTERS[("volcengine_seed_asr", Role.ASR)] = _volcengine_seed_asr_factory
 
 
 def register_adapter(adapter: str, role: Role, factory: Factory) -> None:
@@ -177,7 +176,11 @@ def _provider_for_card(
             f"{role.value!r}, which is not implemented; "
             f"available adapters for this role: {available_adapters(role)}"
         )
-    if card.adapter == "openai_compatible":
+    if card.adapter in {
+        "openai_compatible",
+        "volcengine_embedding",
+        "volcengine_seed_asr",
+    }:
         # Vendor adapters are configured entirely from the card: base URL,
         # credentials env var and pinned model id all travel with it.
         return factory(card=card, **kwargs)

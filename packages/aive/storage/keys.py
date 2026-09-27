@@ -18,6 +18,7 @@ ORIGINAL = "original"  # exactly what the user uploaded
 PROXY = "proxy"  # normalised 540p copy used for analysis
 THUMBNAIL = "thumbnail"  # compact still used by the workspace
 KEYFRAME = "keyframe"  # stills sent to the material model
+ANALYSIS_AUDIO = "analysis-audio"  # short-lived ASR windows, never authority
 MUSIC = "music"  # tracks uploaded for one project
 RENDER = "render"  # finished and preview videos
 REFERENCE = "reference"  # reference videos for remake mode

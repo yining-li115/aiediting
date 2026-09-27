@@ -14,7 +14,7 @@ from ..contracts.patch_project import AddAsset
 from ..contracts.project_doc import AssetRef, AssetRole
 from ..material.probe import ProbeError, ffprobe, probe_asset
 from ..project.repository import RevisionWriteResult
-from ..specs.enums import AUDIO_SUFFIXES, PHOTO_SUFFIXES, VIDEO_SUFFIXES
+from .formats import AUDIO_SUFFIXES, PHOTO_SUFFIXES, VIDEO_SUFFIXES
 from ..storage import ORIGINAL, StorageProvider, project_key, safe_name, sha256_of
 from .repository import AssetIdentityConflict, MediaAssetRecord, MediaAssetRepository
 

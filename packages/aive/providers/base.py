@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from typing import Any, Awaitable, Callable, TypeVar
 
 from ..roles import Role
-from ..specs.base import new_id
+from ..ids import new_id
 
 T = TypeVar("T")
 

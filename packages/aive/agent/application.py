@@ -12,11 +12,22 @@ from ..contracts.project_doc import ProjectDoc
 from ..contracts.rendering import CreateRenderRequest, RenderArtifact
 from ..jobs import Stage
 from ..media.analysis_repository import MediaAnalysisRepository
+from ..media.audio_asset_analysis import AudioAssetAnalysisApplication
 from ..media.repository import AssetProcessingRecord, MediaAssetRepository
+from ..providers.roles import StyleUnderstandingProvider
 from ..project.application import ProjectRevisionApplication
 from ..project.hashing import canonical_model_hash
 from ..rendering.application import RevisionRenderApplication
-from ..specs.base import new_id
+from ..ids import new_id
+from ..storage import StorageProvider
+from ..style_reference import (
+    StyleReferenceBlueprintRepository,
+    StyleReferenceUnavailable,
+    build_style_reference_blueprint,
+    style_reference_blueprint_id,
+    style_reference_evidence_hash,
+    style_reference_inputs,
+)
 from .first_cut import build_first_cut_patch
 from .harness import DirectorReviewRejected, VideoAgentHarness
 from .render_autofix import RenderAutoFixRejected
@@ -49,6 +60,10 @@ class DirectorApplication:
         assets: MediaAssetRepository,
         rendering: RevisionRenderApplication,
         harness: VideoAgentHarness,
+        style_references: StyleReferenceBlueprintRepository | None = None,
+        style_understanding: StyleUnderstandingProvider | None = None,
+        storage: StorageProvider | None = None,
+        audio_assets: AudioAssetAnalysisApplication | None = None,
         id_factory: Callable[[str], str] = new_id,
     ) -> None:
         self._runs = runs
@@ -57,6 +72,10 @@ class DirectorApplication:
         self._assets = assets
         self._rendering = rendering
         self._harness = harness
+        self._style_references = style_references
+        self._style_understanding = style_understanding
+        self._storage = storage
+        self._audio_assets = audio_assets
         self._id_factory = id_factory
 
     def enqueue(self, request: CreateFirstCutRequest) -> FirstCutTicket:
@@ -122,10 +141,41 @@ class DirectorApplication:
             current = self._runs.get_job_run(handle.job_id)
             context = current.context
             if context is None:
+                style_blueprints = await self._resolve_style_references(
+                    revision.document,
+                    statuses,
+                    moments,
+                )
+                if style_blueprints:
+                    handle.emit(
+                        "style_reference_blueprint_ready",
+                        run_id=current.run_id,
+                        reference_count=len(style_blueprints),
+                        summaries=[
+                            blueprint.summary for blueprint in style_blueprints
+                        ],
+                    )
+                audio_analyses = (
+                    await self._audio_assets.resolve(revision.document, statuses)
+                    if self._audio_assets is not None
+                    else ()
+                )
+                if audio_analyses:
+                    handle.emit(
+                        "audio_assets_analyzed",
+                        run_id=current.run_id,
+                        asset_count=len(audio_analyses),
+                        beat_grounded_asset_count=sum(
+                            bool(analysis.signal.beat_times_ms)
+                            for analysis in audio_analyses
+                        ),
+                    )
                 context = self._harness.build_context(
                     revision=revision,
                     asset_statuses=statuses,
                     moments=moments,
+                    style_reference_blueprints=style_blueprints,
+                    audio_asset_analyses=audio_analyses,
                 )
                 current = self._runs.save_context(handle.job_id, context)
             handle.emit(
@@ -134,6 +184,9 @@ class DirectorApplication:
                 base_revision_id=context.base_revision_id,
                 asset_count=len(context.assets),
                 moment_count=len(context.moments),
+                style_reference_count=len(
+                    context.style_reference_blueprints
+                ),
             )
 
             decision = current.decision
@@ -414,6 +467,83 @@ class DirectorApplication:
             self._assets.list_processing_status(project_id),
             self._analysis.list_moments(project_id),
         )
+        if (
+            any(
+                "style_reference" in asset.roles
+                for asset in current.document.assets
+            )
+            and self._style_references is None
+        ):
+            raise FirstCutInputUnavailable(
+                "Style Reference Blueprint repository is not configured"
+            )
+        if any(
+            "style_reference" in asset.roles for asset in current.document.assets
+        ) and (self._style_understanding is None or self._storage is None):
+            raise FirstCutInputUnavailable(
+                "Style Reference model provider and storage are not configured"
+            )
+
+    async def _resolve_style_references(
+        self,
+        document: ProjectDoc,
+        statuses_values: tuple[AssetProcessingRecord, ...],
+        moments: tuple[MomentEvidence, ...],
+    ):
+        style_assets = tuple(
+            asset
+            for asset in document.assets
+            if "style_reference" in asset.roles
+        )
+        if not style_assets:
+            return ()
+        if self._style_references is None:
+            raise FirstCutInputUnavailable(
+                "Style Reference Blueprint repository is not configured"
+            )
+        if self._style_understanding is None or self._storage is None:
+            raise FirstCutInputUnavailable(
+                "Style Reference model provider and storage are not configured"
+            )
+        statuses = {status.asset_id: status for status in statuses_values}
+        resolved = []
+        for asset in style_assets:
+            status = statuses.get(asset.asset_id)
+            if status is None:
+                raise FirstCutInputUnavailable(
+                    f"Style Reference Asset {asset.asset_id!r} has no media record"
+                )
+            try:
+                evidence_hash = style_reference_evidence_hash(status, moments)
+                blueprint_id = style_reference_blueprint_id(evidence_hash)
+                existing = self._style_references.get(
+                    document.project_id,
+                    blueprint_id,
+                )
+                if existing is not None:
+                    resolved.append(existing)
+                    continue
+                objective, reference_moments = style_reference_inputs(
+                    status,
+                    moments,
+                )
+                source = self._storage.open_local(
+                    status.proxy_key or status.storage_key
+                )
+                draft = await self._style_understanding.understand_style(
+                    source,
+                    objective,
+                    reference_moments,
+                )
+                blueprint = build_style_reference_blueprint(
+                    status,
+                    moments,
+                    draft,
+                )
+            except StyleReferenceUnavailable as exc:
+                raise FirstCutInputUnavailable(str(exc)) from exc
+            resolved.append(self._style_references.save(blueprint))
+        return tuple(resolved)
 
     @staticmethod
     def _validate_document_inputs(
@@ -448,6 +578,33 @@ class DirectorApplication:
             )
         if not any(moment.asset_id in source_ids for moment in moments):
             raise FirstCutInputUnavailable("first cut requires analyzed Moments")
+        style_ids = {
+            asset.asset_id
+            for asset in document.assets
+            if "style_reference" in asset.roles
+        }
+        unavailable_styles = sorted(
+            asset_id
+            for asset_id in style_ids
+            if asset_id not in statuses
+            or statuses[asset_id].readiness != "ready"
+            or statuses[asset_id].analysis_readiness not in {"ready", "partial"}
+        )
+        if unavailable_styles:
+            raise FirstCutInputUnavailable(
+                "Style Reference Assets are not understood yet: "
+                f"{unavailable_styles!r}"
+            )
+        missing_style_moments = sorted(
+            asset_id
+            for asset_id in style_ids
+            if not any(moment.asset_id == asset_id for moment in moments)
+        )
+        if missing_style_moments:
+            raise FirstCutInputUnavailable(
+                "Style Reference Assets have no analyzed Moments: "
+                f"{missing_style_moments!r}"
+            )
 
 
 def _stable_token(*parts: str) -> str:

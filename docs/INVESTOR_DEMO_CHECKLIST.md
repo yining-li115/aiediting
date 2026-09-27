@@ -29,13 +29,17 @@
 - [x] 视频、照片、音频按 Project 隔离上传并写入 AssetRef Revision。
 - [x] 上传后创建 durable media-processing Job。
 - [x] 生成 proxy、thumbnail，并持久化 readiness/error 状态。
-- [x] 确定性 Shot 边界检测，不按固定帧数切剧情。
-- [x] 质量分析、关键帧与来源时间映射。
+- [x] 确定性代码只检测物理 Shot 候选并提取关键帧/精确来源时间；可用性、质量、内容、情绪和审美判断由模型完成。
+- [x] `MediaEvidence + SourceUnderstanding v2` 使用开放创意语言、证据引用与模型 provenance，已替换旧质量阈值和语义枚举。
 - [x] ASR 证据带原始 Asset 时间范围和 provenance。
-- [x] 跨 Shot 语义 Moment 聚合，失败时安全回退为 Shot Moments。
+- [x] 原始音频通过独立 `AudioUnderstanding` Provider 生成声音事件、说话含义、音乐、能量/节奏和情绪证据；没有离线规则回退。
+- [x] 跨 Shot 语义 Moment 由模型聚合；非法分组或模型失败会持久化失败状态，不伪造 Shot 级语义结果。
+- [x] Active Embedding 已切换为 `doubao-embedding-vision-251215` 原生多模态 Adapter；真实 Ark 请求返回 2048 维向量并通过 L2 归一化验证，本地 OpenCLIP 仅保留为显式替代候选。
 - [x] `search_moments` 与 `inspect_media` 只读取冻结、项目内的证据。
 - [x] 浏览器显示素材处理与理解进度。
 - [ ] 用真实火山 ASR/视觉/语义模型跑通一组 Golden Footage。
+- [x] 独立 Seed-ASR Key、私有 TOS、15 分钟签名 URL 与真实 Seed-ASR 请求已完成 transport smoke test；返回带时间轴文本并清理临时对象。
+- [ ] 使用授权 Golden Footage 完成多窗口原始 Asset 时间回映、Audio Understanding 和 Moment 聚合 Golden Run；不得用聊天模型或离线枚举回退伪装成功。
 - [ ] 为真实模型结果建立质量基线：Shot、ASR、Moment 可用率与失败样例。
 
 ## 2. AI 自动生成第一版剪辑
@@ -44,15 +48,20 @@
 - [x] AgentRunContext 冻结 Prompt、ProjectDoc、素材状态和 Moments。
 - [x] Director 生成 Creative/Copy/Caption/Music Strategy 和镜头选择。
 - [x] First-cut Decision 转换为 typed Patch，不直接写 ProjectDoc。
+- [x] `EditBlueprint / FirstCutDecision v2` 明确包含镜头、来源范围、输出时序、字幕和音乐决策；Patch Builder 只做稳定 ID/类型翻译与合法性校验，不替模型创作。
 - [x] ProjectService 生成 immutable candidate Revision。
 - [x] Candidate 自动渲染 revision-bound preview。
-- [x] 渲染后 Reviewer 执行确定性检查，并支持火山多模态 Provider。
+- [x] 确定性 Reviewer 只检查身份、范围、时序、流和渲染能力；创意/审美 Reviewer 是独立多模态模型 Provider。
 - [x] Reviewer 拒绝时可进行一次受限 AutoFix；失败保留旧 Revision。
 - [x] Review 通过后才原子接受 Candidate。
 - [x] 浏览器显示 Director 说明、Reviewer 结果、进度和实际预览。
 - [ ] 使用真实火山 Director + Reviewer 完成一次端到端质量验收。
 - [x] 首版 Caption Strategy 将所选 Moment 的 ASR 写入 `caption.clean@1.0.0` CaptionTrack，并在 preview/export 路径实际渲染。
 - [x] 首版 Music Strategy 必须选择项目内明确授权的 music Asset，并实际生成 Gain/Fade/Ducking 音轨与混音预览。
+- [x] 已上传 music/SFX Asset 生成持久化 `AudioAssetAnalysis`：确定性层只测响度、能量、beat/accent/transient，模型层负责情绪、节奏含义和编辑价值。
+- [x] Director 可基于冻结音频证据选择 music/SFX、放置 SFX，并显式声明 cut/transition/section 的音画同步；确定性 Reviewer 拒绝虚构节拍、错误映射和无证据音效。
+- [x] 视频输入型 Render Reviewer 审核实际音乐适配、对白可懂度、淡入淡出、ducking、卡点和 SFX 合理性；帧采样回退明确标记未审核音频。
+- [ ] 接入可搜索的在线音乐/音效来源与许可证据（本轮明确不实现来源适配器）。
 - [ ] 建立第一版剪辑质量评测：开场、连贯性、节奏、重复镜头、音画匹配。
 
 ## 3. Continuous Editing Agent
@@ -65,10 +74,11 @@
 - [x] stale Revision、越权工具、重复 call ID、非法 Trace 和超步数请求会失败。
 - [x] `propose_patch` 只能产生提案，最终仍经过 ProjectService。
 - [x] Agent 根据实际提交操作解释“改了什么”，并关联结果 Revision。
-- [x] 左侧对话面板已接入 Job、Revision、preview 和 history 刷新。
+- [x] 左侧对话面板已接入 Job、Revision、preview 和 history 刷新；运行中单行状态与展开明细来自真实 SSE/Render 事件，按实际顺序展示并在完成后显示耗时。
 - [x] 生产运行时已删除离线 Director 与关键词/规则回退；模型未配置或输出非法时失败并保留当前 Revision。
 - [x] Preview Player 将当前播放帧写入 WorkspaceSelection；完整 preview 和 range preview 都映射为 Revision 的绝对帧，历史 Revision/source proxy 不会污染当前 Turn。
 - [x] Preview Annotation v1 已接通：用户可在 `Preview edit` 标记当前帧或区间、写评论并引用到左侧对话；引用绑定 ready preview Artifact 与精确 Revision，持久化到 Message/AgentTurnContext，并确定性解析为重叠 timeline IDs。
+- [x] Spatial Annotation 已接通：用户可在去除 letterbox 的真实视频内容上拖框；归一化区域与 Revision/Artifact/帧区间一同冻结，Job 从精确 Preview 提取带框证据帧并交给可看图 Director；模型不支持图片或提取失败时显式失败，不做文本回退。
 - [ ] 右侧工作区把真实 clip/track/section 选区传入 WorkspaceSelection。
 - [ ] 完整 Workspace 继续传入 visible range、选区和 comparison Revision。
 - [x] 正式 Director 的闭合 schema、Tool Registry 和 ProjectService/Revision/Preview 路径已支持 clip-boundary Trim、whole-clip Move/Delete；Gemini 与火山共用同一 Provider port，不使用自然语言关键词枚举。
@@ -129,7 +139,17 @@
 - [ ] 音乐、旁白、原声与 ducking 的 preview/export 一致。
 - [ ] 为转场、字幕、Graphic、Effect 建立完整 preview/export 一致性 fixtures；当前已有真实 Graphic 合成回归。
 
-## 6. Reference Remake 模式
+## 6. Style Reference 与 Reference Remake 扩展
+
+- [x] Style Reference 使用正式 Project Asset 上传、proxy、物理 Shot、ASR/原始音频理解、Source Understanding 和语义 Moment 链路。
+- [x] 分析结果生成 content-addressed immutable StyleReferenceBlueprint；重试复用同一证据，变化生成新记录。
+- [x] `StyleReferenceBlueprint v2` 由多模态模型按开放结构返回时间阶段、叙事/镜头/转场/运动/色彩/音画/字体图形语法；代码不再用分布或阈值推断风格。
+- [x] Blueprint 只保存可迁移语法、证据引用和客观容器事实，不含画面/音频字节、transcript 正文、keyframe 或 storage key。
+- [x] Style Reference Asset/Moment 与可选 source evidence 强制隔离，不可能被 first-cut Patch 放入输出。
+- [x] 精确 Blueprint 冻结进 AgentRunContext，Director prompt 和 Reviewer 使用其风格证据。
+- [x] 创建页保留 Style Reference 正式入口；Remake Reference 明确禁用并标记为后续扩展。
+
+以下为 Demo 后的 Reference Remake 扩展：
 
 - [x] ProjectDoc/Patch 已有 ReferenceContext、Policy、Alignment 和 Adaptation 基础 Contract。
 - [ ] Reference 视频上传、proxy 和分析进入正式 Project 工作流。
@@ -144,15 +164,16 @@
 
 ## 7. 投资人可见的产品体验
 
-- [x] 创建页支持 Prompt、素材和 Autonomous/Reference 模式入口。
+- [x] 创建页支持 Prompt、素材、Style Reference 和 Autonomous 模式入口；Remake 入口明确禁用。
 - [x] 基础左侧 Agent / 右侧 Preview 双栏工作区已形成。
 - [x] 上传、理解、Director、Render、Reviewer 有可见进度。
+- [x] Continuous Editing 每轮显示一行可折叠的真实活动状态；展开后可查看 Job 阶段、Agent 工具步骤、Revision commit 和 Render 进度，失败时显示后端原始错误，不生成假日志。
 - [ ] 将当前工程型页面整理为统一、无跳变的产品工作流。
-- [ ] 首次进入时展示清晰的空状态、示例 Prompt 和下一步引导。
+- [x] 首次进入使用单一轻量 Prompt Composer；素材作为附件加入、设置按需展开，并提供可直接填入的 Starter Prompts 与下一步引导。
 - [ ] 所有错误给出用户可执行的恢复操作，而不只显示技术信息。
 - [ ] 所有重试复用幂等键，页面刷新后可恢复正在运行的任务。
 - [ ] 失败的模型、分析或渲染不会清空最后可播放版本。
-- [ ] 移除、禁用或明确标注所有尚未接通的装饰性控件。
+- [x] 创建页已移除旧侧栏、Credits、Prompt Enhance、Inspiration、Sound Effects 等未接通装饰控件；保留的入口均产生真实状态或明确导航。
 - [ ] 统一中文/英文演示语言、术语和 Agent 语气。
 - [ ] 完成常用桌面分辨率与全屏演示模式适配。
 - [ ] 最终导出完成后有明确下载、文件信息和成功状态。
@@ -162,6 +183,7 @@
 - [x] Job、Agent Run、Render、Review 可在进程重启后恢复未完成工作。
 - [x] Provider 按 Director/Reviewer 等 Role 配置，不使用一个全局模型名。
 - [x] Gemini Director 使用固定版本候选链；只对 quota/timeout/5xx 自动降级，实际调用模型进入调用日志和成本记录。
+- [x] 正式火山 Active Stack 已切换为 pinned Pro/Lite/Embedding/Seed-ASR ModelCard；Pro/Lite JSON Schema 与 2048 维 Embedding 已完成真实调用 smoke test。
 - [ ] 将火山正式 Endpoint、Model ID 和密钥以部署 Secret 配置。
 - [ ] 明确各 Role 的模型、输入限制、超时、重试、成本和降级策略。
 - [ ] 为模型调用记录 latency、token、费用、错误类型和 prompt version。
@@ -175,7 +197,7 @@
 ## 9. Golden Demo 与演示验收
 
 - [ ] 选定一组授权、稳定且能体现故事性的 Golden Footage。
-- [ ] 固定 Autonomous 首版 Prompt、连续编辑 Prompt、手动编辑动作和 Reference 视频。
+- [ ] 固定 Autonomous 首版 Prompt、连续编辑 Prompt、手动编辑动作和 Style Reference 视频。
 - [ ] 定义预期 Revision 历史、关键镜头、字幕、音乐和最终时长。
 - [ ] 提供一键创建/重置 Golden Project 的脚本。
 - [ ] 冷缓存完整跑通一次，不依赖之前生成的隐藏结果。
@@ -192,16 +214,18 @@
 
 1. **已完成：保存 Continuous Editing checkpoint**：提交已通过测试的 Conversation、Context、Tool Loop、Patch、Revision、Preview 和左侧对话面板。
 2. **已完成：Preview-only 高频编辑包**：Trim、删除/移动、替换、Crop、中心 Reframe、恒定 Speed、Gain 和 Fade 已通过真实模型和 FFmpeg Golden Run。
-3. **进行中：Preview-only 表现层**：字幕、授权音乐和 Ducking 基线已完成；Remotion Caption/Graphic 的候选、沙箱、Approval、Registry、Agent 工具和 Revision-bound Renderer 闭环已完成；Preview Annotation v1 已完成，下一步是第一批真实组件/转场与产品级前端打磨。
+3. **进行中：Preview-only 表现层**：字幕、授权音乐和 Ducking 基线已完成；Remotion Caption/Graphic 的候选、沙箱、Approval、Registry、Agent 工具和 Revision-bound Renderer 闭环已完成；Temporal + Spatial Preview Annotation 已完成；v0 风格产品外壳与 Continuous Editing 可折叠真实活动记录已接入，下一步是第一批真实组件/转场与剩余前端状态打磨。
 4. **Preview 产品体验**：左侧对话和右侧播放器形成无跳变流程，显示 Agent/Render 阶段、实际改动、历史、Restore、失败恢复和 HQ Export。
 5. **真实模型 Golden Run**：先用 Gemini 调通与评测，随后对素材理解、Director、Reviewer 和多轮 Continuous Editing 完成火山等生产候选的质量调参与 Role 选型。
-6. **Reference Remake Preview-only**：复用同一 ProjectDoc、Agent Harness、Patch、Reviewer 和渲染链路完成参考复刻全流程。
+6. **已完成：Style Reference v2 架构闭环**：多模态模型生成开放语法的 immutable Blueprint 并冻结进 AgentRunContext，Director/Reviewer 使用证据且参考内容不能进入成片；真实模型已验证 Blueprint 生成，完整投资人素材 Golden Run 仍待额度和固定素材。
 7. **Golden Project、部署、可观测性和完整彩排**。
 8. **Workspace**：最后加入只读 Timeline/AI 操作展示，再开放 Selection 和手动编辑。
+9. **扩展：Reference Remake Preview-only**：复用同一 ProjectDoc、Agent Harness、Patch、Reviewer 和渲染链路完成参考复刻全流程。
 
 ### 下一项
 
 - [x] Preview-only 第一组：静态字幕渲染、授权音乐上传/混音与 speech ducking。
 - [x] Remotion 组件基础：候选源码在临时沙箱验证并存入对象存储，不进入产品源码；发布需要显式 Approval。
 - [x] 接入 Agent 组件搜索/创建工具和 Hybrid Remotion RendererProvider，完成 Graphic 的真实 Revision-bound render 回归。
+- [x] 首页加入 v0 风格 Remotion Prompt Recipe 视觉模板；分类筛选与 `+` 可将自然语言视觉要求组合进创建输入框。
 - [ ] 在前端加入候选 PNG 审核/发布入口，并完成第一批投资人演示用动态字幕、标题卡和品牌组件。
